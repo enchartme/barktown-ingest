@@ -1,5 +1,5 @@
 [Unit]
-Description=barktown ingest service – watches MinIO /new/ and processes audio files
+Description=barktown ingest service - watches MinIO /upload-here/ and processes audio files
 After=network-online.target minio.service
 Wants=network-online.target
 
@@ -7,28 +7,13 @@ Wants=network-online.target
 Type=simple
 User=pi
 
-# ── Adjust these paths ──────────────────────────────────────────────────────
-WorkingDirectory=/home/pi/barktown-ingest
+WorkingDirectory=%h/git/enchartme/barktown-ingest
 ExecStart=/usr/bin/node ingest-service.mjs
 Restart=on-failure
 RestartSec=10s
 
-# ── MinIO connection ─────────────────────────────────────────────────────────
-Environment=MINIO_ENDPOINT=localhost
-Environment=MINIO_PORT=9000
-Environment=MINIO_USE_SSL=false
-Environment=MINIO_ACCESS_KEY=minioadmin
-Environment=MINIO_SECRET_KEY=minioadmin
-Environment=MINIO_BUCKET=barktown
-
-# ── Timing ───────────────────────────────────────────────────────────────────
-# Poll /new/ every 20 s; treat a file as stable after 30 s of no size/etag change.
-Environment=POLL_INTERVAL_MS=20000
-Environment=STABILITY_DELAY_MS=30000
-
-# ── Tool binaries (if not on PATH for the service user) ──────────────────────
-# Environment=FFPROBE_BIN=/usr/bin/ffprobe
-# Environment=AUDIOWAVEFORM_BIN=/usr/bin/audiowaveform
+# Edit .env in the WorkingDirectory to set credentials and overrides (see .env.example)
+EnvironmentFile=%h/git/enchartme/barktown-ingest/.env
 
 StandardOutput=journal
 StandardError=journal

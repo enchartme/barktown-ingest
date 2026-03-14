@@ -68,20 +68,56 @@ All settings are environment variables:
 ## Running manually
 
 ```bash
+node ingest-service.mjs
+# or
+npm start
+```
+
+It reads env vars from the shell, so you can pass overrides inline:
+```bash
 MINIO_ACCESS_KEY=yourkey MINIO_SECRET_KEY=yoursecret node ingest-service.mjs
 ```
 
 ---
 
-## Running as a systemd service
+## Deploy as a systemd service
 
-Edit `barktown-ingest.service` — set the `MINIO_*` credentials and adjust `WorkingDirectory` if needed. Then:
+### 1 — Create your `.env` file
 
 ```bash
-sudo cp barktown-ingest.service /etc/systemd/system/
+cd ~/git/enchartme/barktown-ingest
+cp .env.example .env
+nano .env          # set MINIO_ACCESS_KEY, MINIO_SECRET_KEY, and anything else
+```
+
+`.env` is gitignored — it stays on the Pi only.
+
+### 2 — Install the service unit
+
+The unit file uses `%h` (systemd's home-directory specifier for the `User=` account) so paths resolve automatically as long as your clone is at `~/git/enchartme/barktown-ingest`.
+
+```bash
+sudo cp ~/git/enchartme/barktown-ingest/barktown-ingest.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now barktown-ingest
-journalctl -u barktown-ingest -f    # follow logs
+```
+
+### 3 — Check it's running
+
+```bash
+systemctl status barktown-ingest
+journalctl -u barktown-ingest -f    # live log tail
+```
+
+### Updating after a `git pull`
+
+No reinstall needed — just restart the service:
+
+```bash
+cd ~/git/enchartme/barktown-ingest
+git pull
+npm install                          # only needed if package.json changed
+sudo systemctl restart barktown-ingest
 ```
 
 ---

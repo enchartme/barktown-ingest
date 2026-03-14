@@ -2,7 +2,7 @@
 /**
  * barktown — MinIO ingest service
  *
- * Watches the `<BUCKET>/new/` prefix for freshly uploaded .m4a / .aac files.
+ * Watches the `<BUCKET>/upload-here/` prefix for freshly uploaded .m4a / .aac files.
  * For each stable, correctly-named file it:
  *   1. Validates the filename pattern  YYYY-MM-DD HH-MM-SS optional comment.ext
  *   2. Downloads the file to a temp directory
@@ -10,10 +10,10 @@
  *   4. Generates a waveform JSON with audiowaveform (skipped for very short clips)
  *   5. Uploads waveform to  <BUCKET>/waveforms/YYYY/MM/<id>.json
  *   6. Copies audio to      <BUCKET>/audio/YYYY/MM/<filename>
- *   7. Removes it from      <BUCKET>/new/<filename>
+ *   7. Removes it from      <BUCKET>/upload-here/<filename>
  *   8. Appends the entry to <BUCKET>/index.json
  *
- * Files whose names don't match the pattern are left in /new/ untouched.
+ * Files whose names don't match the pattern are left in /upload-here/ untouched.
  *
  * ─── Configuration ────────────────────────────────────────────────────────────
  *
@@ -26,7 +26,7 @@
  *  MINIO_SECRET_KEY        Secret key                  (default: minioadmin)
  *  MINIO_BUCKET            Bucket name                 (default: barktown)
  *
- *  POLL_INTERVAL_MS        How often to scan /new/     (default: 20000)
+ *  POLL_INTERVAL_MS        How often to scan /upload-here/  (default: 20000)
  *  STABILITY_DELAY_MS      Idle time before processing (default: 30000)
  *
  *  FFPROBE_BIN             ffprobe binary              (default: ffprobe)
@@ -61,7 +61,7 @@ const CFG = {
     secretKey: process.env.MINIO_SECRET_KEY ?? "minioadmin",
   },
   bucket:            process.env.MINIO_BUCKET            ?? "barktown",
-  newPrefix:         "new/",
+  newPrefix:         "upload-here/",
   audioPrefix:       "audio/",
   waveformPrefix:    "waveforms/",
   indexKey:          "index.json",
@@ -246,7 +246,7 @@ async function processFile(obj) {
 
   const parsed = parseFilename(filename);
   if (!parsed) {
-    warn(`Filename does not match pattern — leaving in /new/: "${filename}"`);
+    warn(`Filename does not match pattern — leaving in /upload-here/: "${filename}"`);
     return;
   }
 
@@ -281,7 +281,7 @@ async function processFile(obj) {
       }
     }
 
-    // Move audio: copy to audio/YYYY/MM/, then delete from new/.
+    // Move audio: copy to audio/YYYY/MM/, then delete from upload-here/.
     const audioKey = `${CFG.audioPrefix}${yyyy}/${mm}/${filename}`;
     await copyObject(objectKey, audioKey);
     await removeObject(objectKey);
@@ -332,7 +332,7 @@ async function poll() {
 
   const ready = stableObjects(files);
   if (ready.length === 0) {
-    log(`${files.length} file(s) in /new/ — waiting for stability...`);
+    log(`${files.length} file(s) in /upload-here/ — waiting for stability...`);
     return;
   }
 

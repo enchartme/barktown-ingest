@@ -5,7 +5,8 @@
   "description": "Pi-side ingest service for barktown — watches MinIO /new/, validates filenames, generates waveforms, organises audio, updates index.json",
   "type": "module",
   "scripts": {
-    "start": "node ingest-service.mjs"
+    "start": "node ingest-service.mjs",
+    "restart": "sudo systemctl restart barktown-ingest"
   },
   "dependencies": {
     "minio": "^8.0.7"

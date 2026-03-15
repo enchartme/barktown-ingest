@@ -190,6 +190,23 @@ function getDuration(filePath) {
   } catch { return 0; }
 }
 
+/**
+ * Convert any audio file to WAV using ffmpeg so that audiowaveform can read it.
+ * Returns true on success, false on failure.
+ */
+function convertToWav(inputPath, outputPath) {
+  const r = spawnSync(
+    "ffmpeg",
+    ["-y", "-i", inputPath, "-ar", "16000", "-ac", "1", "-f", "wav", outputPath],
+    { encoding: "utf8" }
+  );
+  if (r.error || r.status !== 0) {
+    warn(`ffmpeg WAV conversion failed: ${r.stderr?.trim() || r.error?.message}`);
+    return false;
+  }
+  return true;
+}
+
 function generateWaveform(audioPath, outPath) {
   const r = spawnSync(
     CFG.audiowaveformBin,
@@ -273,12 +290,18 @@ async function processFile(obj) {
     if (kind === "audio") {
       const waveformFilename = `${id}.json`;
       const tmpWaveform      = path.join(tmpDir, waveformFilename);
-      if (generateWaveform(tmpAudio, tmpWaveform)) {
-        const waveformKey = `${CFG.waveformPrefix}${yyyy}/${mm}/${waveformFilename}`;
-        await upload(tmpWaveform, waveformKey, "application/json");
-        waveformPath = waveformKey;
-        log(`  ↑ waveform → ${waveformKey}`);
+      // audiowaveform only supports WAV/MP3/FLAC/Ogg — convert first
+      const tmpWav = path.join(tmpDir, `${id}.wav`);
+      if (!convertToWav(tmpAudio, tmpWav)) {
+        throw new Error(`ffmpeg WAV conversion failed for "${filename}" — leaving in upload-here/`);
       }
+      if (!generateWaveform(tmpWav, tmpWaveform)) {
+        throw new Error(`audiowaveform failed for "${filename}" — leaving in upload-here/`);
+      }
+      const waveformKey = `${CFG.waveformPrefix}${yyyy}/${mm}/${waveformFilename}`;
+      await upload(tmpWaveform, waveformKey, "application/json");
+      waveformPath = waveformKey;
+      log(`  ↑ waveform → ${waveformKey}`);
     }
 
     // Move audio: copy to audio/YYYY/MM/, then delete from upload-here/.

@@ -7,7 +7,8 @@
   "scripts": {
     "start": "node ingest-service.mjs",
     "restart": "sudo systemctl restart barktown-ingest",
-    "validate-index": "node validate-index.mjs"
+    "validate-index": "node validate-index.mjs",
+    "rebuild-index": "node rebuild-index.mjs"
   },
   "dependencies": {
     "minio": "^8.0.7"

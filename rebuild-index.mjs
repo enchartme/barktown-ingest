@@ -7,18 +7,18 @@
  * Takes /audio as the source of truth.
  * For each audio file:
  *   - parses the filename to extract metadata
+ *   - downloads the file and measures duration with ffprobe
+ *   - determines kind: 'audio' (≥ threshold), 'note' (< threshold), 'empty' (0 s)
  *   - checks for a matching waveform in /waveforms
- *   - determines kind: 'audio' if waveform exists, 'note' otherwise
  *
  * Overwrites index.json with the rebuilt index, sorted by datetimeLocal.
- *
- * NOTE: durationSec will be null for all rebuilt entries (would require
- *       downloading every file to measure).  Re-ingest to recover it.
  */
 
 import * as Minio from "minio";
 import fs from "fs";
+import os from "os";
 import path from "path";
+import { spawnSync } from "child_process";
 import { fileURLToPath } from "url";
 import { Readable } from "stream";
 
@@ -46,10 +46,12 @@ const CFG = {
     accessKey: process.env.MINIO_ACCESS_KEY ?? "minioadmin",
     secretKey: process.env.MINIO_SECRET_KEY ?? "minioadmin",
   },
-  bucket:         process.env.MINIO_BUCKET ?? "barktown",
-  audioPrefix:    "audio/",
-  waveformPrefix: "waveforms/",
-  indexKey:       "index.json",
+  bucket:            process.env.MINIO_BUCKET            ?? "barktown",
+  audioPrefix:       "audio/",
+  waveformPrefix:    "waveforms/",
+  indexKey:          "index.json",
+  ffprobeBin:        process.env.FFPROBE_BIN               ?? "ffprobe",
+  waveformThreshSec: parseFloat(process.env.WAVEFORM_THRESHOLD_SEC ?? "5"),
 };
 
 const mc = new Minio.Client(CFG.minio);
@@ -98,6 +100,21 @@ async function uploadBuffer(data, objectKey, contentType = "application/json") {
   await mc.putObject(CFG.bucket, objectKey, stream, buf.length, { "Content-Type": contentType });
 }
 
+// ─── Audio helpers ────────────────────────────────────────────────────────────
+
+function getDuration(filePath) {
+  const r = spawnSync(
+    CFG.ffprobeBin,
+    ["-v", "quiet", "-print_format", "json", "-show_format", filePath],
+    { encoding: "utf8" }
+  );
+  if (r.error || r.status !== 0) return 0;
+  try {
+    const data = JSON.parse(r.stdout);
+    return parseFloat(data.format?.duration ?? "0");
+  } catch { return 0; }
+}
+
 // ─── Formatting ───────────────────────────────────────────────────────────────
 
 const GREEN  = "\x1b[32m";
@@ -138,12 +155,15 @@ async function main() {
   // ── Build index entries ─────────────────────────────────────────────────────
 
   hdr("Processing audio files");
+  dim(`Downloading each file to measure duration (ffprobe)…`);
 
-  const entries    = [];
-  const skipped    = [];
+  const entries       = [];
+  const skipped       = [];
   const usedWaveforms = new Set();
+  let   n             = 0;
 
   for (const obj of audioFiles) {
+    n++;
     const filename = path.basename(obj.name);
     const parsed   = parseFilename(filename);
 
@@ -157,32 +177,47 @@ async function main() {
 
     // Expected waveform path mirrors the audio path structure:
     //   audio/YYYY/MM/filename.ext  →  waveforms/YYYY/MM/id.json
-    const audioDir    = path.dirname(obj.name);                          // e.g. audio/2026/01
-    const relDir      = audioDir.slice(CFG.audioPrefix.length);          // e.g. 2026/01
+    const audioDir    = path.dirname(obj.name);               // e.g. audio/2026/01
+    const relDir      = audioDir.slice(CFG.audioPrefix.length); // e.g. 2026/01
     const waveformKey = `${CFG.waveformPrefix}${relDir}/${id}.json`;
 
     const hasWaveform = waveformKeys.has(waveformKey);
-    const kind        = hasWaveform ? "audio" : "note";
     if (hasWaveform) usedWaveforms.add(waveformKey);
 
-    entries.push({
-      id,
-      filename,
-      audioPath:    obj.name,
-      waveformPath: hasWaveform ? waveformKey : null,
-      date,
-      time,
-      datetimeLocal,
-      label,
-      durationSec:  null,   // not available without downloading
-      kind,
-    });
+    // Download to temp dir and measure duration.
+    const tmpDir   = fs.mkdtempSync(path.join(os.tmpdir(), "barktown-rebuild-"));
+    const tmpAudio = path.join(tmpDir, filename);
+    try {
+      await mc.fGetObject(CFG.bucket, obj.name, tmpAudio);
+      const durationSec = getDuration(tmpAudio);
+      const kind =
+        durationSec === 0             ? "empty"
+        : durationSec < CFG.waveformThreshSec ? "note"
+        : "audio";
 
-    const kindTag = hasWaveform
-      ? `${GREEN}audio${RESET}`
-      : `${DIM}note${RESET}`;
-    log(`  ${kindTag}  ${obj.name}`);
+      entries.push({
+        id,
+        filename,
+        audioPath:    obj.name,
+        waveformPath: hasWaveform ? waveformKey : null,
+        date,
+        time,
+        datetimeLocal,
+        label,
+        durationSec: parseFloat(durationSec.toFixed(3)),
+        kind,
+      });
+
+      const kindTag =
+        kind === "audio" ? `${GREEN}audio${RESET}` :
+        kind === "note"  ? `${DIM}note ${RESET}` :
+                           `${YELLOW}empty${RESET}`;
+      process.stdout.write(`\r  [${n}/${audioFiles.length}] ${kindTag}  ${durationSec.toFixed(1)}s  ${filename}                `);
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
   }
+  console.log(); // newline after progress line
 
   // ── Orphan waveforms ────────────────────────────────────────────────────────
 
@@ -206,17 +241,16 @@ async function main() {
   ok(`${entries.length} entries written to index.json`);
   const audioCount = entries.filter(e => e.kind === "audio").length;
   const noteCount  = entries.filter(e => e.kind === "note").length;
+  const emptyCount = entries.filter(e => e.kind === "empty").length;
   dim(`audio : ${audioCount}`);
   dim(`note  : ${noteCount}`);
+  if (emptyCount > 0) dim(`empty : ${emptyCount}`);
   if (skipped.length > 0) {
     warn(`${skipped.length} file(s) skipped (unrecognised filename pattern):`);
     for (const s of skipped) console.log(`    ${s}`);
   }
   if (orphanWaveforms.length > 0) {
     warn(`${orphanWaveforms.length} orphan waveform file(s) not referenced by any entry`);
-  }
-  if (noteCount > 0) {
-    dim(`note: durationSec is null for all rebuilt entries — re-ingest to recover`);
   }
   console.log();
 }

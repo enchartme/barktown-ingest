@@ -2,16 +2,22 @@
 /**
  * barktown — index rebuild script
  *
- * Usage:  npm run rebuild-index
+ * Full rebuild (default):
+ *   npm run rebuild-index
+ *   node rebuild-index.mjs
  *
- * Takes /audio as the source of truth.
- * For each audio file:
- *   - parses the filename to extract metadata
- *   - downloads the file and measures duration with ffprobe
- *   - determines kind: 'audio' (≥ threshold), 'note' (< threshold), 'empty' (0 s)
- *   - checks for a matching waveform in /waveforms
+ * Partial rebuild (upsert specific files only):
+ *   npm run rebuild-index -- audio-list.txt
+ *   node rebuild-index.mjs audio-list.txt
  *
- * Overwrites index.json with the rebuilt index, sorted by datetimeLocal.
+ * The optional txt file should contain one MinIO audio path per line, e.g.:
+ *   audio/2022/01/2022-01-03 18-15-00 barks when neighbors come home.aac
+ *   audio/2022/02/2022-02-08 18-12-00 bsrk bark.aac
+ *
+ * Full rebuild: lists /audio/, downloads every file, overwrites index.json.
+ * Partial rebuild: processes only the listed files, upserts their entries
+ *   into the existing index.json (adding new ones, replacing existing ones)
+ *   and leaves all other entries untouched.
  */
 
 import * as Minio from "minio";
@@ -115,6 +121,27 @@ function getDuration(filePath) {
   } catch { return 0; }
 }
 
+/** Returns true if objectKey exists in the bucket. */
+async function objectExists(objectKey) {
+  try {
+    await mc.statObject(CFG.bucket, objectKey);
+    return true;
+  } catch { return false; }
+}
+
+/** Load index.json from bucket. Returns [] if missing. */
+async function loadIndex() {
+  try {
+    const stream = await mc.getObject(CFG.bucket, CFG.indexKey);
+    const chunks = [];
+    for await (const chunk of stream) chunks.push(chunk);
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch (e) {
+    if (e.code === "NoSuchKey" || e.code === "NotFound") return [];
+    throw e;
+  }
+}
+
 // ─── Formatting ───────────────────────────────────────────────────────────────
 
 const GREEN  = "\x1b[32m";
@@ -134,30 +161,62 @@ const dim  = (s)   => console.log(`${DIM}  ${s}${RESET}`);
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
-  hdr("Barktown index rebuild");
+  const partialListFile = process.argv[2] ?? null;
+  const isPartial = partialListFile !== null;
+
+  hdr(isPartial ? "Barktown index partial rebuild" : "Barktown index rebuild");
   dim(`${CFG.minio.useSSL ? "https" : "http"}://${CFG.minio.endPoint}:${CFG.minio.port}  bucket: ${CFG.bucket}`);
+  if (isPartial) dim(`List file: ${path.resolve(partialListFile)}`);
 
-  // ── List bucket ─────────────────────────────────────────────────────────────
+  // ── Determine which audio files to process ──────────────────────────────────
 
-  process.stdout.write("\nListing audio/ and waveforms/…");
-  const [audioObjs, waveformObjs] = await Promise.all([
-    listObjects(CFG.audioPrefix),
-    listObjects(CFG.waveformPrefix),
-  ]);
-  console.log(" done.\n");
+  /** @type {{ name: string, size: number }[]} */
+  let audioFiles;
 
-  const audioFiles    = audioObjs.filter(o => !o.name.endsWith("/") && o.size > 0);
-  const waveformKeys  = new Set(waveformObjs.filter(o => !o.name.endsWith("/")).map(o => o.name));
+  if (isPartial) {
+    // Parse the txt file: one audio object key per line, leading spaces stripped.
+    const absPath = path.resolve(partialListFile);
+    if (!fs.existsSync(absPath)) {
+      err(`File not found: ${absPath}`);
+      process.exit(1);
+    }
+    audioFiles = fs.readFileSync(absPath, "utf8")
+      .split("\n")
+      .map(l => l.trim())
+      .filter(l => l && !l.startsWith("#"))
+      .map(l => ({ name: l, size: 1 /* placeholder — will be confirmed by download */ }));
+    dim(`\n${audioFiles.length} files to process from list.`);
+  } else {
+    process.stdout.write("\nListing audio/ and waveforms/…");
+    const [audioObjs, waveformObjs] = await Promise.all([
+      listObjects(CFG.audioPrefix),
+      listObjects(CFG.waveformPrefix),
+    ]);
+    console.log(" done.\n");
+    audioFiles = audioObjs.filter(o => !o.name.endsWith("/") && o.size > 0);
+    // Store waveform set for full rebuild (orphan detection).
+    main._waveformKeys = new Set(waveformObjs.filter(o => !o.name.endsWith("/")).map(o => o.name));
+    dim(`audio files   : ${audioFiles.length}`);
+    dim(`waveform files: ${main._waveformKeys.size}`);
+  }
 
-  dim(`audio files   : ${audioFiles.length}`);
-  dim(`waveform files: ${waveformKeys.size}`);
+  const waveformKeys  = main._waveformKeys ?? null; // only populated in full mode
+
+  // ── Load existing index (needed for partial; optionally for full) ────────────
+
+  let existingEntries = [];
+  if (isPartial) {
+    process.stdout.write("\nLoading existing index.json…");
+    existingEntries = await loadIndex();
+    console.log(` ${existingEntries.length} entries.`);
+  }
 
   // ── Build index entries ─────────────────────────────────────────────────────
 
   hdr("Processing audio files");
   dim(`Downloading each file to measure duration (ffprobe)…`);
 
-  const entries       = [];
+  const newEntries    = [];
   const skipped       = [];
   const usedWaveforms = new Set();
   let   n             = 0;
@@ -175,13 +234,14 @@ async function main() {
 
     const { date, time, datetimeLocal, label, id } = parsed;
 
-    // Expected waveform path mirrors the audio path structure:
-    //   audio/YYYY/MM/filename.ext  →  waveforms/YYYY/MM/id.json
-    const audioDir    = path.dirname(obj.name);               // e.g. audio/2026/01
-    const relDir      = audioDir.slice(CFG.audioPrefix.length); // e.g. 2026/01
+    const audioDir    = path.dirname(obj.name);
+    const relDir      = audioDir.slice(CFG.audioPrefix.length);
     const waveformKey = `${CFG.waveformPrefix}${relDir}/${id}.json`;
 
-    const hasWaveform = waveformKeys.has(waveformKey);
+    // Full rebuild: check waveformKeys set.  Partial: stat the object.
+    const hasWaveform = waveformKeys
+      ? waveformKeys.has(waveformKey)
+      : await objectExists(waveformKey);
     if (hasWaveform) usedWaveforms.add(waveformKey);
 
     // Download to temp dir and measure duration.
@@ -194,7 +254,7 @@ async function main() {
         durationSec < CFG.waveformThreshSec ? "note"
         : "audio";
 
-      entries.push({
+      newEntries.push({
         id,
         filename,
         audioPath:    obj.name,
@@ -217,28 +277,46 @@ async function main() {
   }
   console.log(); // newline after progress line
 
-  // ── Orphan waveforms ────────────────────────────────────────────────────────
+  // ── Orphan waveforms (full rebuild only) ────────────────────────────────────
 
-  const orphanWaveforms = [...waveformKeys].filter(k => !usedWaveforms.has(k));
-  if (orphanWaveforms.length > 0) {
-    hdr("Orphan waveforms (no matching audio file)");
-    for (const k of orphanWaveforms) warn(k);
+  let orphanWaveforms = [];
+  if (waveformKeys) {
+    orphanWaveforms = [...waveformKeys].filter(k => !usedWaveforms.has(k));
+    if (orphanWaveforms.length > 0) {
+      hdr("Orphan waveforms (no matching audio file)");
+      for (const k of orphanWaveforms) warn(k);
+    }
   }
 
-  // ── Sort + write ────────────────────────────────────────────────────────────
+  // ── Merge + sort + write ────────────────────────────────────────────────────
 
-  entries.sort((a, b) => a.datetimeLocal.localeCompare(b.datetimeLocal));
+  let finalEntries;
+  if (isPartial) {
+    // Upsert: replace existing entries by id, append new ones.
+    const byId = new Map(existingEntries.map(e => [e.id, e]));
+    let updated = 0, added = 0;
+    for (const e of newEntries) {
+      if (byId.has(e.id)) { updated++; } else { added++; }
+      byId.set(e.id, e);
+    }
+    finalEntries = [...byId.values()];
+    dim(`\nUpserted: ${updated} updated, ${added} added.`);
+  } else {
+    finalEntries = newEntries;
+  }
+
+  finalEntries.sort((a, b) => a.datetimeLocal.localeCompare(b.datetimeLocal));
 
   hdr("Writing index.json");
-  const json = JSON.stringify(entries, null, 2) + "\n";
+  const json = JSON.stringify(finalEntries, null, 2) + "\n";
   await uploadBuffer(json, CFG.indexKey);
 
   // ── Summary ─────────────────────────────────────────────────────────────────
 
   hdr("Summary");
-  ok(`${entries.length} entries written to index.json`);
-  const audioCount = entries.filter(e => e.kind === "audio").length;
-  const noteCount  = entries.filter(e => e.kind === "note").length;
+  ok(`${finalEntries.length} entries in index.json`);
+  const audioCount = finalEntries.filter(e => e.kind === "audio").length;
+  const noteCount  = finalEntries.filter(e => e.kind === "note").length;
   dim(`audio : ${audioCount}`);
   dim(`note  : ${noteCount}`);
   if (skipped.length > 0) {
@@ -250,6 +328,8 @@ async function main() {
   }
   console.log();
 }
+
+main._waveformKeys = null;
 
 main().catch(e => {
   console.error(`\n${RED}Fatal:${RESET}`, e.message);

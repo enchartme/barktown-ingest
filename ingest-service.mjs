@@ -348,6 +348,15 @@ async function poll() {
     return;
   }
 
+  // Discard 0-byte objects (failed/partial uploads) — remove silently.
+  for (const o of objects) {
+    if (!o.name.endsWith("/") && o.size === 0) {
+      warn(`Removing 0-byte file (failed upload?): ${path.basename(o.name)}`);
+      try { await removeObject(o.name); } catch { /* best-effort */ }
+      seenMap.delete(o.name);
+    }
+  }
+
   const files = objects.filter(o => !o.name.endsWith("/") && o.size > 0);
   if (files.length === 0) return;
 

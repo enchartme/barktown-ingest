@@ -58,33 +58,15 @@ const BOLD   = "\x1b[1m";
 
 // ─── Parse list file ──────────────────────────────────────────────────────────
 
-// Format: YYYY-MM-DD HH-MM-SS <label>.<ext>
-// Also accept YYYY-MM-DD HH:MM:SS (colon variant) just in case.
-const LINE_RE = /^(\d{4}-\d{2}-\d{2})\s+(\d{2})[-:](\d{2})[-:](\d{2})\s+(.+)$/;
-
 /**
- * Parse a single list-file line.
- * @returns {{ datetimeLocal: string, label: string, originalLine: string } | null}
+ * Each non-blank, non-comment line is treated as a filename verbatim.
+ * e.g. "2025-12-11 05-32-00.m4a"  or  "2021-05-25 15-44-00 bjäfsigt.aac"
+ * @returns {{ filename: string } | null}
  */
 function parseLine(line, lineNo) {
   const trimmed = line.trim();
   if (!trimmed || trimmed.startsWith("#")) return null;
-
-  const m = LINE_RE.exec(trimmed);
-  if (!m) {
-    console.warn(`  ${YELLOW}line ${lineNo}: unrecognised format, skipping: ${trimmed}${RESET}`);
-    return null;
-  }
-
-  const [, datePart, hh, mm, ss, rest] = m;
-  // Strip the extension from the label (optional — just for display).
-  const label = rest.replace(/\.[a-zA-Z0-9]{2,5}$/, "").trim();
-
-  return {
-    datetimeLocal: `${datePart}T${hh}:${mm}:${ss}`,
-    label,
-    originalLine: trimmed,
-  };
+  return { filename: trimmed };
 }
 
 // ─── Fetch index.json ─────────────────────────────────────────────────────────
@@ -126,20 +108,20 @@ const index = await fetchIndex();
 const indexEntries = Array.isArray(index) ? index : (index.entries ?? []);
 console.log(`  ${indexEntries.length} entries in index\n`);
 
-// ─── Build lookup sets keyed by datetimeLocal ─────────────────────────────────
+// ─── Build lookup sets keyed by filename ─────────────────────────────────────
 
-// Index: datetimeLocal → entry object
+// Index: filename → entry object
 /** @type {Map<string, object>} */
-const indexByTime = new Map();
+const indexByFilename = new Map();
 for (const e of indexEntries) {
-  if (e.datetimeLocal) indexByTime.set(e.datetimeLocal, e);
+  if (e.filename) indexByFilename.set(e.filename, e);
 }
 
-// List: datetimeLocal → parsed line
+// List: filename → parsed line
 /** @type {Map<string, object>} */
-const listByTime = new Map();
+const listByFilename = new Map();
 for (const e of listEntries) {
-  listByTime.set(e.datetimeLocal, e);
+  listByFilename.set(e.filename, e);
 }
 
 // ─── Compare ──────────────────────────────────────────────────────────────────
@@ -148,23 +130,23 @@ const matched        = [];   // in both
 const missingFromIdx = [];   // in list, not in index
 const notInList      = [];   // in index, not in list
 
-for (const [dt, listEntry] of listByTime) {
-  if (indexByTime.has(dt)) {
-    matched.push({ dt, listEntry, indexEntry: indexByTime.get(dt) });
+for (const [filename, listEntry] of listByFilename) {
+  if (indexByFilename.has(filename)) {
+    matched.push({ filename, listEntry, indexEntry: indexByFilename.get(filename) });
   } else {
     missingFromIdx.push(listEntry);
   }
 }
 
-for (const [dt, indexEntry] of indexByTime) {
-  if (!listByTime.has(dt)) {
+for (const [filename, indexEntry] of indexByFilename) {
+  if (!listByFilename.has(filename)) {
     notInList.push(indexEntry);
   }
 }
 
-// Sort all output by datetimeLocal for readability.
-missingFromIdx.sort((a, b) => a.datetimeLocal.localeCompare(b.datetimeLocal));
-notInList.sort((a, b) => (a.datetimeLocal ?? "").localeCompare(b.datetimeLocal ?? ""));
+// Sort all output by filename for readability.
+missingFromIdx.sort((a, b) => a.filename.localeCompare(b.filename));
+notInList.sort((a, b) => (a.filename ?? "").localeCompare(b.filename ?? ""));
 
 // ─── Report ───────────────────────────────────────────────────────────────────
 
@@ -177,7 +159,7 @@ if (missingFromIdx.length === 0) {
   console.log("    (none)");
 } else {
   for (const e of missingFromIdx) {
-    console.log(`    ${e.datetimeLocal}  ${e.label}`);
+    console.log(`    ${e.filename}`);
   }
 }
 
@@ -186,8 +168,7 @@ if (notInList.length === 0) {
   console.log("    (none)");
 } else {
   for (const e of notInList) {
-    const label = e.label ?? e.id ?? "(no label)";
-    console.log(`    ${e.datetimeLocal}  ${label}`);
+    console.log(`    ${e.filename ?? e.id ?? "(unknown)"}`);
   }
 }
 

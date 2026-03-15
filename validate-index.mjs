@@ -72,7 +72,7 @@ async function loadIndex() {
   }
 }
 
-// ─── Formatting ───────────────────────────────────────────────────────────────
+// ─── Output (tee: console + plain-text log) ───────────────────────────────────
 
 const GREEN  = "\x1b[32m";
 const YELLOW = "\x1b[33m";
@@ -81,17 +81,41 @@ const BOLD   = "\x1b[1m";
 const DIM    = "\x1b[2m";
 const RESET  = "\x1b[0m";
 
-const ok   = (s) => `${GREEN}✓${RESET} ${s}`;
-const warn = (s) => `${YELLOW}⚠${RESET}  ${s}`;
-const bad  = (s) => `${RED}✗${RESET} ${s}`;
-const hdr  = (s) => `\n${BOLD}${s}${RESET}`;
-const dim  = (s) => `${DIM}  ${s}${RESET}`;
+const logLines = [];
+
+/** Print one ANSI line to console and one plain line to the log buffer. */
+function tee(ansiLine, plainLine) {
+  console.log(ansiLine);
+  logLines.push(plainLine ?? ansiLine);
+}
+
+const ok   = (s) => tee(`${GREEN}✓${RESET} ${s}`,  `✅ ${s}`);
+const warn = (s) => tee(`${YELLOW}⚠${RESET}  ${s}`, `⚠️  ${s}`);
+const bad  = (s) => tee(`${RED}✗${RESET} ${s}`,    `❌ ${s}`);
+const hdr  = (s) => tee(`\n${BOLD}${s}${RESET}`,   `\n─── ${s} ───`);
+const dim  = (s) => tee(`${DIM}  ${s}${RESET}`,    `   ${s}`);
+const detail = (s) => {
+  console.log(s);
+  // Strip ANSI escape codes for the plain-text log
+  logLines.push(s.replace(/\x1b\[[0-9;]*m/g, ""));
+};
+
+const __logsDir = path.join(__dirname, "logs");
+
+function writeLog() {
+  if (!fs.existsSync(__logsDir)) fs.mkdirSync(__logsDir);
+  const ts      = new Date().toISOString().replace(/:/g, "-").replace("T", "_").slice(0, 19);
+  const logFile = path.join(__logsDir, `validate-${ts}.txt`);
+  fs.writeFileSync(logFile, logLines.join("\n") + "\n", "utf8");
+  console.log(`\n${DIM}Log written → ${logFile}${RESET}`);
+  return logFile;
+}
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
-  console.log(hdr(`Barktown index validator`));
-  console.log(dim(`${CFG.minio.useSSL ? "https" : "http"}://${CFG.minio.endPoint}:${CFG.minio.port}  bucket: ${CFG.bucket}`));
+  hdr(`Barktown index validator`);
+  dim(`${CFG.minio.useSSL ? "https" : "http"}://${CFG.minio.endPoint}:${CFG.minio.port}  bucket: ${CFG.bucket}`);
 
   // ── Fetch data ──────────────────────────────────────────────────────────────
 
@@ -102,99 +126,96 @@ async function main() {
     listObjects(CFG.waveformPrefix),
   ]);
   console.log(` done.\n`);
+  logLines.push("");
 
   const audioFiles    = new Set(audioObjs.map(o => o.name));
   const waveformFiles = new Set(waveformObjs.map(o => o.name));
 
-  console.log(dim(`index.json  : ${index.length} entries`));
-  console.log(dim(`audio/      : ${audioFiles.size} files`));
-  console.log(dim(`waveforms/  : ${waveformFiles.size} files`));
+  dim(`index.json  : ${index.length} entries`);
+  dim(`audio/      : ${audioFiles.size} files`);
+  dim(`waveforms/  : ${waveformFiles.size} files`);
 
   // ── Index → bucket cross-check ──────────────────────────────────────────────
 
-  console.log(hdr("Audio files"));
+  hdr("Audio files");
 
   const audioPathsInIndex  = index.map(e => e.audioPath).filter(Boolean);
   const audioIdxSet        = new Set(audioPathsInIndex);
 
-  // Duplicate audioPath values within index
-  const audioIdxDupes = audioPathsInIndex.filter((v, i, a) => a.indexOf(v) !== i);
-  const missingAudio  = audioPathsInIndex.filter(p => !audioFiles.has(p));
+  const audioIdxDupes  = audioPathsInIndex.filter((v, i, a) => a.indexOf(v) !== i);
+  const missingAudio   = audioPathsInIndex.filter(p => !audioFiles.has(p));
   const unindexedAudio = [...audioFiles].filter(p => !audioIdxSet.has(p));
 
   if (audioIdxDupes.length === 0) {
-    console.log(ok(`No duplicate audioPath entries in index`));
+    ok(`No duplicate audioPath entries in index`);
   } else {
-    console.log(bad(`${audioIdxDupes.length} audioPath(s) appear more than once in index:`));
-    for (const p of new Set(audioIdxDupes)) console.log(`    ${RED}${p}${RESET}`);
+    bad(`${audioIdxDupes.length} audioPath(s) appear more than once in index:`);
+    for (const p of new Set(audioIdxDupes)) detail(`    ${RED}${p}${RESET}`);
   }
 
   if (missingAudio.length === 0) {
-    console.log(ok(`All indexed audio files exist in bucket`));
+    ok(`All indexed audio files exist in bucket`);
   } else {
-    console.log(bad(`${missingAudio.length} indexed audio file(s) missing from bucket:`));
-    for (const p of missingAudio) console.log(`    ${RED}${p}${RESET}`);
+    bad(`${missingAudio.length} indexed audio file(s) missing from bucket:`);
+    for (const p of missingAudio) detail(`    ${RED}${p}${RESET}`);
   }
 
   if (unindexedAudio.length === 0) {
-    console.log(ok(`No unindexed audio files in bucket`));
+    ok(`No unindexed audio files in bucket`);
   } else {
-    console.log(warn(`${unindexedAudio.length} audio file(s) in bucket not in index:`));
-    for (const p of unindexedAudio) console.log(`    ${YELLOW}${p}${RESET}`);
+    warn(`${unindexedAudio.length} audio file(s) in bucket not in index:`);
+    for (const p of unindexedAudio) detail(`    ${YELLOW}${p}${RESET}`);
   }
 
   // ── Waveform cross-check ────────────────────────────────────────────────────
 
-  console.log(hdr("Waveform files"));
+  hdr("Waveform files");
 
   const wavePathsInIndex = index.map(e => e.waveformPath).filter(Boolean);
   const waveIdxSet       = new Set(wavePathsInIndex);
 
-  const waveIdxDupes    = wavePathsInIndex.filter((v, i, a) => a.indexOf(v) !== i);
-  const missingWave     = wavePathsInIndex.filter(p => !waveformFiles.has(p));
-  const unindexedWave   = [...waveformFiles].filter(p => !waveIdxSet.has(p));
-
-  // Entries that should have a waveform (kind=audio) but don't
+  const waveIdxDupes   = wavePathsInIndex.filter((v, i, a) => a.indexOf(v) !== i);
+  const missingWave    = wavePathsInIndex.filter(p => !waveformFiles.has(p));
+  const unindexedWave  = [...waveformFiles].filter(p => !waveIdxSet.has(p));
   const missingWavePath = index.filter(e => e.kind === "audio" && !e.waveformPath);
 
   if (waveIdxDupes.length === 0) {
-    console.log(ok(`No duplicate waveformPath entries in index`));
+    ok(`No duplicate waveformPath entries in index`);
   } else {
-    console.log(bad(`${waveIdxDupes.length} waveformPath(s) appear more than once in index:`));
-    for (const p of new Set(waveIdxDupes)) console.log(`    ${RED}${p}${RESET}`);
+    bad(`${waveIdxDupes.length} waveformPath(s) appear more than once in index:`);
+    for (const p of new Set(waveIdxDupes)) detail(`    ${RED}${p}${RESET}`);
   }
 
   if (missingWave.length === 0) {
-    console.log(ok(`All indexed waveform files exist in bucket`));
+    ok(`All indexed waveform files exist in bucket`);
   } else {
-    console.log(bad(`${missingWave.length} indexed waveform file(s) missing from bucket:`));
-    for (const p of missingWave) console.log(`    ${RED}${p}${RESET}`);
+    bad(`${missingWave.length} indexed waveform file(s) missing from bucket:`);
+    for (const p of missingWave) detail(`    ${RED}${p}${RESET}`);
   }
 
   if (unindexedWave.length === 0) {
-    console.log(ok(`No unindexed waveform files in bucket`));
+    ok(`No unindexed waveform files in bucket`);
   } else {
-    console.log(warn(`${unindexedWave.length} waveform file(s) in bucket not in index:`));
-    for (const p of unindexedWave) console.log(`    ${YELLOW}${p}${RESET}`);
+    warn(`${unindexedWave.length} waveform file(s) in bucket not in index:`);
+    for (const p of unindexedWave) detail(`    ${YELLOW}${p}${RESET}`);
   }
 
   if (missingWavePath.length === 0) {
-    console.log(ok(`All audio-kind entries have a waveformPath`));
+    ok(`All audio-kind entries have a waveformPath`);
   } else {
-    console.log(warn(`${missingWavePath.length} audio-kind entry/entries with no waveformPath in index:`));
-    for (const e of missingWavePath) console.log(`    ${YELLOW}${e.audioPath}${RESET}`);
+    warn(`${missingWavePath.length} audio-kind entry/entries with no waveformPath in index:`);
+    for (const e of missingWavePath) detail(`    ${YELLOW}${e.audioPath}${RESET}`);
   }
 
   // ── Duplicate detection ─────────────────────────────────────────────────────
 
-  console.log(hdr("Duplicate detection"));
+  hdr("Duplicate detection");
 
-  // Sort entries by datetimeLocal for proximity checks
   const sorted = [...index].sort((a, b) =>
     (a.datetimeLocal ?? "").localeCompare(b.datetimeLocal ?? "")
   );
 
-  const exactGroups  = new Map(); // datetimeLocal → entries[]
+  const exactGroups = new Map();
   for (const e of sorted) {
     const key = e.datetimeLocal ?? "(missing)";
     if (!exactGroups.has(key)) exactGroups.set(key, []);
@@ -203,17 +224,16 @@ async function main() {
 
   const exactDupes = [...exactGroups.values()].filter(g => g.length > 1);
   if (exactDupes.length === 0) {
-    console.log(ok(`No entries with identical timestamps`));
+    ok(`No entries with identical timestamps`);
   } else {
-    console.log(bad(`${exactDupes.length} group(s) with identical timestamp:`));
+    bad(`${exactDupes.length} group(s) with identical timestamp:`);
     for (const group of exactDupes) {
-      console.log(`    ${RED}${group[0].datetimeLocal}${RESET}`);
-      for (const e of group) console.log(`      ${e.audioPath ?? e.id}`);
+      detail(`    ${RED}${group[0].datetimeLocal}${RESET}`);
+      for (const e of group) detail(`      ${e.audioPath ?? e.id}`);
     }
   }
 
-  // Within-1-minute groups (excluding exact duplicates already reported)
-  const nearGroups = []; // groups of entries within 60 s of each other
+  const nearGroups = [];
   let i = 0;
   while (i < sorted.length) {
     const anchor = new Date(sorted[i].datetimeLocal ?? 0).getTime();
@@ -224,7 +244,6 @@ async function main() {
     ) j++;
     if (j - i > 1) {
       const group = sorted.slice(i, j);
-      // Only report if not already an exact-duplicate group
       const allSameTime = group.every(e => e.datetimeLocal === group[0].datetimeLocal);
       if (!allSameTime) nearGroups.push(group);
     }
@@ -232,12 +251,12 @@ async function main() {
   }
 
   if (nearGroups.length === 0) {
-    console.log(ok(`No entries within 1 minute of each other (beyond exact duplicates)`));
+    ok(`No entries within 1 minute of each other (beyond exact duplicates)`);
   } else {
-    console.log(warn(`${nearGroups.length} group(s) of entries recorded within 1 minute of each other:`));
+    warn(`${nearGroups.length} group(s) of entries recorded within 1 minute of each other:`);
     for (const group of nearGroups) {
-      console.log(`    ${YELLOW}${group[0].datetimeLocal} … ${group[group.length - 1].datetimeLocal}${RESET}`);
-      for (const e of group) console.log(`      ${e.datetimeLocal}  ${e.audioPath ?? e.id}`);
+      detail(`    ${YELLOW}${group[0].datetimeLocal} … ${group[group.length - 1].datetimeLocal}${RESET}`);
+      for (const e of group) detail(`      ${e.datetimeLocal}  ${e.audioPath ?? e.id}`);
     }
   }
 
@@ -250,15 +269,16 @@ async function main() {
 
   const warnings = nearGroups.length;
 
-  console.log(hdr("Summary"));
+  hdr("Summary");
   if (issues === 0 && warnings === 0) {
-    console.log(ok(`Everything looks good — ${index.length} entries, no issues found.\n`));
+    ok(`Everything looks good — ${index.length} entries, no issues found.`);
   } else {
-    if (issues > 0)   console.log(bad(`${issues} issue(s) found`));
-    if (warnings > 0) console.log(warn(`${warnings} warning(s) (near-duplicate groups)`));
-    console.log();
+    if (issues > 0)   bad(`${issues} issue(s) found`);
+    if (warnings > 0) warn(`${warnings} warning(s) (near-duplicate groups)`);
   }
+  detail("");
 
+  writeLog();
   process.exit(issues > 0 ? 1 : 0);
 }
 

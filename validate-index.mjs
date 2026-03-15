@@ -128,13 +128,12 @@ async function main() {
   console.log(` done.\n`);
   logLines.push("");
 
-  const audioFiles    = new Set(audioObjs.map(o => o.name));
-  const waveformFiles = new Set(waveformObjs.map(o => o.name));
+  const audioFiles    = new Set(audioObjs.filter(o => !o.name.endsWith("/")).map(o => o.name));
+  const waveformFiles = new Set(waveformObjs.filter(o => !o.name.endsWith("/")).map(o => o.name));
 
   dim(`index.json  : ${index.length} entries`);
   dim(`audio/      : ${audioFiles.size} files`);
   dim(`waveforms/  : ${waveformFiles.size} files`);
-
   // ── Index → bucket cross-check ──────────────────────────────────────────────
 
   hdr("Audio files");

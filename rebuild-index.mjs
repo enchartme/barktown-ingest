@@ -147,7 +147,7 @@ async function main() {
   console.log(" done.\n");
 
   const audioFiles    = audioObjs.filter(o => !o.name.endsWith("/") && o.size > 0);
-  const waveformKeys  = new Set(waveformObjs.map(o => o.name));
+  const waveformKeys  = new Set(waveformObjs.filter(o => !o.name.endsWith("/")).map(o => o.name));
 
   dim(`audio files   : ${audioFiles.length}`);
   dim(`waveform files: ${waveformKeys.size}`);

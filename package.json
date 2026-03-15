@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "start": "node ingest-service.mjs",
-    "restart": "sudo systemctl restart barktown-ingest"
+    "restart": "sudo systemctl restart barktown-ingest",
+    "validate-index": "node validate-index.mjs"
   },
   "dependencies": {
     "minio": "^8.0.7"

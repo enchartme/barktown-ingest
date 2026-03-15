@@ -226,7 +226,10 @@ function generateWaveform(audioPath, outPath) {
 // A file is considered "stable" (upload complete) when its etag+size has not
 // changed for at least STABILITY_DELAY_MS milliseconds.
 
-const seenMap = new Map();
+const seenMap    = new Map();
+
+/** Keys currently being processed — prevents duplicate concurrent work. */
+const inProgress = new Set();
 
 function updateSeen(objects) {
   const now      = Date.now();
@@ -259,11 +262,16 @@ async function processFile(obj) {
   const filename  = path.basename(obj.name);
   const objectKey = obj.name;
 
+  if (inProgress.has(objectKey)) {
+    return; // already being handled by a concurrent poll tick
+  }
+  inProgress.add(objectKey);
   log(`Processing: ${filename}`);
 
   const parsed = parseFilename(filename);
   if (!parsed) {
     warn(`Filename does not match pattern — leaving in /upload-here/: "${filename}"`);
+    inProgress.delete(objectKey);
     return;
   }
 
@@ -331,13 +339,29 @@ async function processFile(obj) {
 
     seenMap.delete(objectKey);
   } finally {
+    inProgress.delete(objectKey);
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 }
 
 // ─── Poll loop ────────────────────────────────────────────────────────────────
 
+let _polling = false;
+
 async function poll() {
+  if (_polling) {
+    log(`Poll skipped — previous poll still running (${inProgress.size} file(s) in progress).`);
+    return;
+  }
+  _polling = true;
+  try {
+    await _poll();
+  } finally {
+    _polling = false;
+  }
+}
+
+async function _poll() {
   let objects;
   try {
     objects = await listObjects(CFG.newPrefix);
@@ -366,9 +390,15 @@ async function poll() {
     return;
   }
 
-  log(`${ready.length} stable file(s) ready.`);
+  // Skip files already being processed by a previous (still-running) tick.
+  const toProcess = ready.filter(obj => !inProgress.has(obj.name));
+  const skipped   = ready.length - toProcess.length;
+  if (skipped > 0) log(`${skipped} file(s) already in progress — skipping.`);
+  if (toProcess.length === 0) return;
 
-  for (const obj of ready) {
+  log(`${toProcess.length} stable file(s) ready.`);
+
+  for (const obj of toProcess) {
     try {
       await processFile(obj);
     } catch (e) {

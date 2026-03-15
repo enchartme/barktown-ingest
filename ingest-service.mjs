@@ -280,11 +280,9 @@ async function processFile(obj) {
     // Duration + kind.
     const durationSec = getDuration(tmpAudio);
     const kind =
-      durationSec === 0             ? "empty"
-      : durationSec < CFG.waveformThreshSec ? "note"
+      durationSec < CFG.waveformThreshSec ? "note"
       : "audio";
     log(`  duration: ${durationSec.toFixed(2)}s  kind: ${kind}`);
-
     // Waveform.
     let waveformPath = null;
     if (kind === "audio") {

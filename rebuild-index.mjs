@@ -191,8 +191,7 @@ async function main() {
       await mc.fGetObject(CFG.bucket, obj.name, tmpAudio);
       const durationSec = getDuration(tmpAudio);
       const kind =
-        durationSec === 0             ? "empty"
-        : durationSec < CFG.waveformThreshSec ? "note"
+        durationSec < CFG.waveformThreshSec ? "note"
         : "audio";
 
       entries.push({
@@ -210,8 +209,7 @@ async function main() {
 
       const kindTag =
         kind === "audio" ? `${GREEN}audio${RESET}` :
-        kind === "note"  ? `${DIM}note ${RESET}` :
-                           `${YELLOW}empty${RESET}`;
+                           `${DIM}note ${RESET}`;
       process.stdout.write(`\r  [${n}/${audioFiles.length}] ${kindTag}  ${durationSec.toFixed(1)}s  ${filename}                `);
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -241,10 +239,8 @@ async function main() {
   ok(`${entries.length} entries written to index.json`);
   const audioCount = entries.filter(e => e.kind === "audio").length;
   const noteCount  = entries.filter(e => e.kind === "note").length;
-  const emptyCount = entries.filter(e => e.kind === "empty").length;
   dim(`audio : ${audioCount}`);
   dim(`note  : ${noteCount}`);
-  if (emptyCount > 0) dim(`empty : ${emptyCount}`);
   if (skipped.length > 0) {
     warn(`${skipped.length} file(s) skipped (unrecognised filename pattern):`);
     for (const s of skipped) console.log(`    ${s}`);

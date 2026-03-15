@@ -9,6 +9,7 @@
     "restart": "sudo systemctl restart barktown-ingest",
     "validate-index": "node validate-index.mjs",
     "rebuild-index": "node rebuild-index.mjs",
+    "compare-index-with-list": "node compare-index-with-list.mjs",
     "observe": "journalctl -u barktown-ingest -f"
   },
   "dependencies": {

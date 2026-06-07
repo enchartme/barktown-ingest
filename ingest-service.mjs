@@ -65,6 +65,9 @@ const CFG = {
   audioPrefix:       "audio/",
   waveformPrefix:    "waveforms/",
   indexKey:          "index.json",
+  samplesPrefix:     "training-samples/",
+  samplesWavePrefix: "training-samples-waveforms/",
+  samplesIndexKey:   "training-samples-index.json",
   pollIntervalMs:    parseInt(process.env.POLL_INTERVAL_MS   ?? "20000", 10),
   stabilityDelayMs:  parseInt(process.env.STABILITY_DELAY_MS ?? "30000", 10),
   ffprobeBin:        process.env.FFPROBE_BIN        ?? "ffprobe",
@@ -175,6 +178,25 @@ async function saveIndex(entries) {
   await uploadBuffer(json, CFG.indexKey);
 }
 
+/** Download training-samples-index.json, parse, return array. Returns [] if not found. */
+async function loadSamplesIndex() {
+  try {
+    const stream = await mc.getObject(CFG.bucket, CFG.samplesIndexKey);
+    const chunks = [];
+    for await (const chunk of stream) chunks.push(chunk);
+    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+  } catch (e) {
+    if (e.code === "NoSuchKey") return [];
+    throw e;
+  }
+}
+
+/** Write the entries array to training-samples-index.json in the bucket. */
+async function saveSamplesIndex(entries) {
+  const json = JSON.stringify(entries, null, 2) + "\n";
+  await uploadBuffer(json, CFG.samplesIndexKey);
+}
+
 // ─── Audio helpers ────────────────────────────────────────────────────────────
 
 function getDuration(filePath) {
@@ -226,10 +248,12 @@ function generateWaveform(audioPath, outPath) {
 // A file is considered "stable" (upload complete) when its etag+size has not
 // changed for at least STABILITY_DELAY_MS milliseconds.
 
-const seenMap    = new Map();
+const seenMap        = new Map();
+const seenSamplesMap = new Map();
 
 /** Keys currently being processed — prevents duplicate concurrent work. */
-const inProgress = new Set();
+const inProgress        = new Set();
+const inProgressSamples = new Set();
 
 function updateSeen(objects) {
   const now      = Date.now();
@@ -254,6 +278,154 @@ function stableObjects(objects) {
     const seen = seenMap.get(obj.name);
     return seen && seen.stableAt <= threshold;
   });
+}
+
+// ─── Process one training sample ─────────────────────────────────────────────
+//
+// Filename expected: YYYY-MM-DD HH-MM-SS SAMPLE <label>.wav
+// (produced by barktown-goblin recorder.py)
+//
+// Object key layout:
+//   training-samples/<label>/YYYY-MM-DD HH-MM-SS SAMPLE <label>.wav
+//   training-samples-waveforms/<label>/<id>.json
+//   training-samples-index.json  (top-level, same bucket)
+
+const SAMPLE_FILENAME_RE =
+  /^(\d{4}-\d{2}-\d{2}) (\d{2})-(\d{2})-(\d{2}) SAMPLE ([a-z]+)\.wav$/i;
+
+function parseSampleFilename(filename) {
+  const match = SAMPLE_FILENAME_RE.exec(filename);
+  if (!match) return null;
+  const [, datePart, hh, mm, ss, label] = match;
+  const datetimeLocal = `${datePart}T${hh}:${mm}:${ss}`;
+  const stem = filename.slice(0, -".wav".length);
+  const id   = stem
+    .replace(/\s+/g, "_")
+    .replace(/[^a-zA-Z0-9_-]/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_|_$/, "");
+  return { date: datePart, datetimeLocal, label: label.toLowerCase(), id };
+}
+
+async function processTrainingSample(obj) {
+  const filename  = path.basename(obj.name);
+  const objectKey = obj.name;
+
+  if (inProgressSamples.has(objectKey)) return;
+  inProgressSamples.add(objectKey);
+  log(`[samples] Processing: ${filename}`);
+
+  const parsed = parseSampleFilename(filename);
+  if (!parsed) {
+    warn(`[samples] Filename does not match pattern — skipping: "${filename}"`);
+    inProgressSamples.delete(objectKey);
+    return;
+  }
+
+  const { date, datetimeLocal, label, id } = parsed;
+  const [yyyy, mm] = date.split("-");
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "barktown-sample-"));
+
+  try {
+    // Download WAV.
+    const tmpWav = path.join(tmpDir, filename);
+    await mc.fGetObject(CFG.bucket, objectKey, tmpWav);
+    log(`[samples]   down: ${filename}`);
+
+    const durationSec = getDuration(tmpWav);
+    log(`[samples]   duration: ${durationSec.toFixed(2)}s  label: ${label}`);
+
+    // Waveform (always generated — samples are short enough to be worth it).
+    let waveformPath = null;
+    if (durationSec >= 1) {
+      const waveformFilename = `${id}.json`;
+      const tmpWaveform      = path.join(tmpDir, waveformFilename);
+      if (generateWaveform(tmpWav, tmpWaveform)) {
+        const waveformKey = `${CFG.samplesWavePrefix}${label}/${waveformFilename}`;
+        await upload(tmpWaveform, waveformKey, "application/json");
+        waveformPath = waveformKey;
+        log(`[samples]   wave -> ${waveformKey}`);
+      } else {
+        warn(`[samples]   waveform skipped (audiowaveform failed)`);
+      }
+    }
+
+    // Update training-samples-index.json.
+    const entry = {
+      id, filename,
+      audioPath: objectKey,
+      waveformPath,
+      date, datetimeLocal, label,
+      durationSec: parseFloat(durationSec.toFixed(3)),
+    };
+
+    const entries = await loadSamplesIndex();
+    const idx = entries.findIndex(e => e.id === id);
+    if (idx >= 0) {
+      entries[idx] = entry;
+    } else {
+      entries.push(entry);
+      entries.sort((a, b) => a.datetimeLocal.localeCompare(b.datetimeLocal));
+    }
+    await saveSamplesIndex(entries);
+    log(`[samples]   index updated (${entries.length} total, label=${label})`);
+
+    seenSamplesMap.delete(objectKey);
+  } finally {
+    inProgressSamples.delete(objectKey);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+// ─── Poll loop — training samples ────────────────────────────────────────────
+
+let _pollingSamples = false;
+
+async function pollTrainingSamples() {
+  if (_pollingSamples) return;
+  _pollingSamples = true;
+  try {
+    let objects;
+    try {
+      objects = await listObjects(CFG.samplesPrefix);
+    } catch (e) {
+      err(`[samples] listObjects failed: ${e.message}`);
+      return;
+    }
+
+    const files = objects.filter(o => !o.name.endsWith("/") && o.size > 0);
+    if (files.length === 0) return;
+
+    // Stability tracking (reuses the same logic, separate map).
+    const now = Date.now();
+    const liveKeys = new Set(files.map(o => o.name));
+    for (const key of seenSamplesMap.keys()) {
+      if (!liveKeys.has(key)) seenSamplesMap.delete(key);
+    }
+    for (const obj of files) {
+      const prev    = seenSamplesMap.get(obj.name);
+      const changed = !prev || prev.etag !== obj.etag || prev.size !== obj.size;
+      if (changed) seenSamplesMap.set(obj.name, { etag: obj.etag, size: obj.size, stableAt: now });
+    }
+
+    const threshold = now - CFG.stabilityDelayMs;
+    const ready = files.filter(obj => {
+      const seen = seenSamplesMap.get(obj.name);
+      return seen && seen.stableAt <= threshold && !inProgressSamples.has(obj.name);
+    });
+    if (ready.length === 0) return;
+
+    log(`[samples] ${ready.length} stable file(s) ready.`);
+    for (const obj of ready) {
+      try {
+        await processTrainingSample(obj);
+      } catch (e) {
+        err(`[samples] Failed to process "${obj.name}": ${e.message}`);
+      }
+    }
+  } finally {
+    _pollingSamples = false;
+  }
 }
 
 // ─── Process one file ─────────────────────────────────────────────────────────
@@ -428,7 +600,9 @@ async function main() {
   }
 
   await poll();
+  await pollTrainingSamples();
   setInterval(poll, CFG.pollIntervalMs);
+  setInterval(pollTrainingSamples, CFG.pollIntervalMs);
 }
 
 main().catch(e => { err(e); process.exit(1); });

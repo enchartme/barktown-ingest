@@ -108,6 +108,19 @@ async function uploadBuffer(data, objectKey) {
   await mc.putObject(CFG.bucket, objectKey, stream, buf.length, { "Content-Type": "application/json" });
 }
 
+function generateWaveform(audioPath, outPath) {
+  const r = spawnSync(
+    process.env.AUDIOWAVEFORM_BIN ?? "audiowaveform",
+    ["-i", audioPath, "-o", outPath, "--pixels-per-second", "20", "--bits", "16"],
+    { encoding: "utf8" }
+  );
+  if (r.error || r.status !== 0) {
+    console.warn(`audiowaveform failed: ${r.stderr?.trim() || r.error?.message}`);
+    return false;
+  }
+  return true;
+}
+
 // --- Main --------------------------------------------------------------------
 
 async function main() {
@@ -146,17 +159,24 @@ async function main() {
 
     const { date, datetimeLocal, label, id } = parsed;
 
-    // Check for a pre-existing waveform
+    // Check for a pre-existing waveform — but always regenerate so we get 16-bit precision
     const waveKey = `${CFG.samplesWavePrefix}${label}/${id}.json`;
-    const waveformPath = waveKeySet.has(waveKey) ? waveKey : null;
+    let waveformPath = null;
 
-    // Download to a temp file to read duration via ffprobe
-    const tmpDir  = fs.mkdtempSync(path.join(os.tmpdir(), "barktown-rebuild-"));
-    const tmpWav  = path.join(tmpDir, filename);
+    // Download to a temp file to read duration and generate waveform
+    const tmpDir     = fs.mkdtempSync(path.join(os.tmpdir(), "barktown-rebuild-"));
+    const tmpWav     = path.join(tmpDir, filename);
+    const tmpWaveform = path.join(tmpDir, `${id}.json`);
     let durationSec = 0;
     try {
       await mc.fGetObject(CFG.bucket, obj.name, tmpWav);
       durationSec = getDuration(tmpWav);
+      if (generateWaveform(tmpWav, tmpWaveform)) {
+        await uploadBuffer(fs.readFileSync(tmpWaveform), waveKey);
+        waveformPath = waveKey;
+      } else {
+        log(`  WARN  waveform generation failed for "${filename}"`);
+      }
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
@@ -169,8 +189,11 @@ async function main() {
       durationSec: parseFloat(durationSec.toFixed(3)),
     });
 
-    log(`  OK    ${label}  ${datetimeLocal}  ${durationSec.toFixed(1)}s${waveformPath ? "  (waveform found)" : ""}`);
+    log(`  OK    ${label}  ${datetimeLocal}  ${durationSec.toFixed(1)}s${waveformPath ? "  waveform OK" : "  no waveform"}`);
   }
+
+  // waveKeySet no longer needed — remove unused variable warning
+  void waveKeySet;
 
   entries.sort((a, b) => a.datetimeLocal.localeCompare(b.datetimeLocal));
 

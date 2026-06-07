@@ -229,10 +229,10 @@ function convertToWav(inputPath, outputPath) {
   return true;
 }
 
-function generateWaveform(audioPath, outPath) {
+function generateWaveform(audioPath, outPath, bits = 8) {
   const r = spawnSync(
     CFG.audiowaveformBin,
-    ["-i", audioPath, "-o", outPath, "--pixels-per-second", "20", "--bits", "8"],
+    ["-i", audioPath, "-o", outPath, "--pixels-per-second", "20", "--bits", String(bits)],
     { encoding: "utf8" }
   );
   if (r.error || r.status !== 0) {
@@ -340,7 +340,7 @@ async function processTrainingSample(obj) {
     if (durationSec >= 1) {
       const waveformFilename = `${id}.json`;
       const tmpWaveform      = path.join(tmpDir, waveformFilename);
-      if (generateWaveform(tmpWav, tmpWaveform)) {
+      if (generateWaveform(tmpWav, tmpWaveform, 16)) {
         const waveformKey = `${CFG.samplesWavePrefix}${label}/${waveformFilename}`;
         await upload(tmpWaveform, waveformKey, "application/json");
         waveformPath = waveformKey;

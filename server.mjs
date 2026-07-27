@@ -63,13 +63,21 @@ async function refreshSamplesIndex() {
   }
 }
 
-/** Validate annotation fields. Returns an error string, or null if valid. */
+/**
+ * Validate annotation fields. Returns an error string, or null if valid.
+ *
+ * Annotations double as two things, distinguished by `source`:
+ *  - fragment labels (source: "manual"/"model"): startSec < endSec, label is
+ *    one of the fixed training-sample categories.
+ *  - time-coded notes (source: "note"): a point in time (startSec === endSec
+ *    is allowed), label holds the freeform note text.
+ */
 function validateAnnotationInput({ startSec, endSec, label }, durationSec) {
   if (typeof startSec !== "number" || !Number.isFinite(startSec) || startSec < 0) {
     return "startSec must be a non-negative number";
   }
-  if (typeof endSec !== "number" || !Number.isFinite(endSec) || endSec <= startSec) {
-    return "endSec must be a number greater than startSec";
+  if (typeof endSec !== "number" || !Number.isFinite(endSec) || endSec < startSec) {
+    return "endSec must be a number greater than or equal to startSec";
   }
   if (typeof durationSec === "number" && durationSec > 0 && endSec > durationSec + 0.25) {
     return `endSec (${endSec}) exceeds sample duration (${durationSec})`;

@@ -100,10 +100,10 @@ update, so the existing barktown client keeps working unchanged.
 
 ## API server
 
-`server.mjs` is a small Fastify app exposing read-only HTTP endpoints over
-the training-samples database. It runs as a separate process from
-`ingest-service.mjs` — SQLite's WAL mode (enabled in `lib/db.mjs`) safely
-supports one writer plus readers across processes.
+`server.mjs` is a small Fastify app exposing HTTP endpoints (read + write)
+over the training-samples database. It runs as a separate process from
+`ingest-service.mjs` — SQLite's WAL mode plus a busy timeout (enabled in
+`lib/db.mjs`) safely support multiple writers/readers across processes.
 
 There is **no authentication**. This is meant to be reachable only over
 Tailscale (same trust model as barktown-goblin's own status API) — training
@@ -123,6 +123,15 @@ npm run server
 | `GET /api/samples` | List active training samples (`?label=bark` to filter) |
 | `GET /api/samples/:id` | Get one sample |
 | `GET /api/samples/:id/annotations` | List fragment annotations for a sample |
+| `DELETE /api/samples/:id` | Delete a sample (MinIO objects + DB row) |
+| `PATCH /api/samples/:id` | Rename/move a sample to a different label (`{"label":"bark"}`) |
+| `POST /api/samples/:id/annotations` | Add a fragment annotation (`{startSec, endSec, label, source?}`) |
+| `PATCH /api/annotations/:id` | Update a fragment annotation (partial body) |
+| `DELETE /api/annotations/:id` | Delete a fragment annotation |
+
+`training-samples-index.json` in MinIO is regenerated after each mutation on
+a best-effort basis (the database is the source of truth, and
+`ingest-service.mjs` regenerates it anyway on every new upload).
 
 | Variable | Default | Description |
 |---|---|---|

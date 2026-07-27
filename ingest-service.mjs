@@ -43,203 +43,45 @@
  * and edit the Environment lines before enabling it.
  */
 
-import * as Minio from "minio";
-import { spawnSync } from "child_process";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { Readable } from "stream";
+
+import { loadEnv } from "./lib/env.mjs";
+loadEnv(import.meta.url);
+
+import { buildConfig } from "./lib/config.mjs";
+import {
+  createClient, listObjects, download, upload, copyObject, removeObject,
+  loadJson, saveJson,
+} from "./lib/minio.mjs";
+import { getDuration, convertToWav, generateWaveform } from "./lib/audio.mjs";
+import { parseFilename, parseSampleFilename } from "./lib/filenames.mjs";
+import { openDb, upsertSample, exportSamplesIndexJson } from "./lib/db.mjs";
+import { log, warn, err } from "./lib/log.mjs";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
-const CFG = {
-  minio: {
-    endPoint:  process.env.MINIO_ENDPOINT   ?? "localhost",
-    port:      parseInt(process.env.MINIO_PORT ?? "9000", 10),
-    useSSL:    (process.env.MINIO_USE_SSL   ?? "false") === "true",
-    accessKey: process.env.MINIO_ACCESS_KEY ?? "minioadmin",
-    secretKey: process.env.MINIO_SECRET_KEY ?? "minioadmin",
-  },
-  bucket:            process.env.MINIO_BUCKET            ?? "barktown",
-  newPrefix:         "upload-here/",
-  audioPrefix:       "audio/",
-  waveformPrefix:    "waveforms/",
-  indexKey:          "index.json",
-  samplesPrefix:     "training-samples/",
-  samplesWavePrefix: "training-samples-waveforms/",
-  samplesIndexKey:   "training-samples-index.json",
-  pollIntervalMs:    parseInt(process.env.POLL_INTERVAL_MS   ?? "20000", 10),
-  stabilityDelayMs:  parseInt(process.env.STABILITY_DELAY_MS ?? "30000", 10),
-  ffprobeBin:        process.env.FFPROBE_BIN        ?? "ffprobe",
-  audiowaveformBin:  process.env.AUDIOWAVEFORM_BIN  ?? "audiowaveform",
-  waveformThreshSec: parseFloat(process.env.WAVEFORM_THRESHOLD_SEC ?? "5"),
-};
+const CFG = buildConfig();
 
-// ─── Filename pattern ─────────────────────────────────────────────────────────
-//
-//   YYYY-MM-DD HH-MM-SS optional comment.(m4a|aac)
-//
-//   No trailing space between end-of-comment and .ext.
-//   Examples:
-//     2026-01-17 15-42-00 bark bark bark shot.m4a
-//     2025-12-11 05-32-00.aac
+// ─── MinIO client + local database ───────────────────────────────────────────
 
-const FILENAME_RE =
-  /^(\d{4}-\d{2}-\d{2}) (\d{2})-(\d{2})-(\d{2})(?:\s+(\S.*?))?\.(m4a|aac)$/i;
-
-function parseFilename(filename) {
-  const match = FILENAME_RE.exec(filename);
-  if (!match) return null;
-
-  const [, datePart, hh, mm, ss, rawLabel] = match;
-  const label          = rawLabel ? rawLabel.trim() : "";
-  const date           = datePart;
-  const time           = `${hh}:${mm}`;
-  const datetimeLocal  = `${date}T${hh}:${mm}:${ss}`;
-
-  // Slug: "2026-01-17 15-42-00 bark shot" → "2026-01-17_15-42-00_bark_shot"
-  const ext  = filename.match(/\.(m4a|aac)$/i)[0];
-  const stem = filename.slice(0, -ext.length);
-  const id   = stem
-    .replace(/\s+/g, "_")
-    .replace(/[^a-zA-Z0-9_-]/g, "_")
-    .replace(/_+/g, "_")
-    .replace(/^_|_$/, "");
-
-  return { date, time, datetimeLocal, label, id };
-}
-
-// ─── Logging ──────────────────────────────────────────────────────────────────
-
-function ts()  { return new Date().toISOString(); }
-function log(...a) { console.log(`[${ts()}]`, ...a); }
-function warn(...a) { console.warn(`[${ts()}] WARN`, ...a); }
-function err(...a) { console.error(`[${ts()}] ERROR`, ...a); }
-
-// ─── MinIO helpers ────────────────────────────────────────────────────────────
-
-const mc = new Minio.Client(CFG.minio);
-
-/** List all objects under a prefix. */
-async function listObjects(prefix) {
-  return new Promise((resolve, reject) => {
-    const objects = [];
-    const stream  = mc.listObjectsV2(CFG.bucket, prefix, true);
-    stream.on("data",  o  => objects.push(o));
-    stream.on("end",   () => resolve(objects));
-    stream.on("error", reject);
-  });
-}
-
-/** Download an object to a local file path. */
-async function download(objectKey, destPath) {
-  await mc.fGetObject(CFG.bucket, objectKey, destPath);
-}
-
-/** Upload a local file to an object key. */
-async function upload(srcPath, objectKey, contentType = "application/octet-stream") {
-  await mc.fPutObject(CFG.bucket, objectKey, srcPath, { "Content-Type": contentType });
-}
-
-/** Upload a Buffer / string as an object. */
-async function uploadBuffer(data, objectKey, contentType = "application/json") {
-  const buf    = Buffer.isBuffer(data) ? data : Buffer.from(data, "utf8");
-  const stream = Readable.from(buf);
-  await mc.putObject(CFG.bucket, objectKey, stream, buf.length, { "Content-Type": contentType });
-}
-
-/** Copy an object within the same bucket. */
-async function copyObject(srcKey, destKey) {
-  const conds = new Minio.CopyConditions();
-  await mc.copyObject(CFG.bucket, destKey, `/${CFG.bucket}/${srcKey}`, conds);
-}
-
-/** Remove an object. */
-async function removeObject(key) {
-  await mc.removeObject(CFG.bucket, key);
-}
+const mc = createClient(CFG.minio);
+const db = openDb(CFG.dbPath);
 
 /** Download index.json, parse, return array. Returns [] if not found. */
 async function loadIndex() {
-  try {
-    const stream = await mc.getObject(CFG.bucket, CFG.indexKey);
-    const chunks = [];
-    for await (const chunk of stream) chunks.push(chunk);
-    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
-  } catch (e) {
-    if (e.code === "NoSuchKey") return [];
-    throw e;
-  }
+  return loadJson(mc, CFG.bucket, CFG.indexKey, []);
 }
 
 /** Write the entries array to index.json in the bucket. */
 async function saveIndex(entries) {
-  const json = JSON.stringify(entries, null, 2) + "\n";
-  await uploadBuffer(json, CFG.indexKey);
+  await saveJson(mc, CFG.bucket, CFG.indexKey, entries);
 }
 
-/** Download training-samples-index.json, parse, return array. Returns [] if not found. */
-async function loadSamplesIndex() {
-  try {
-    const stream = await mc.getObject(CFG.bucket, CFG.samplesIndexKey);
-    const chunks = [];
-    for await (const chunk of stream) chunks.push(chunk);
-    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
-  } catch (e) {
-    if (e.code === "NoSuchKey") return [];
-    throw e;
-  }
-}
-
-/** Write the entries array to training-samples-index.json in the bucket. */
-async function saveSamplesIndex(entries) {
-  const json = JSON.stringify(entries, null, 2) + "\n";
-  await uploadBuffer(json, CFG.samplesIndexKey);
-}
-
-// ─── Audio helpers ────────────────────────────────────────────────────────────
-
-function getDuration(filePath) {
-  const r = spawnSync(
-    CFG.ffprobeBin,
-    ["-v", "quiet", "-print_format", "json", "-show_format", filePath],
-    { encoding: "utf8" }
-  );
-  if (r.error || r.status !== 0) return 0;
-  try {
-    const data = JSON.parse(r.stdout);
-    return parseFloat(data.format?.duration ?? "0");
-  } catch { return 0; }
-}
-
-/**
- * Convert any audio file to WAV using ffmpeg so that audiowaveform can read it.
- * Returns true on success, false on failure.
- */
-function convertToWav(inputPath, outputPath) {
-  const r = spawnSync(
-    "ffmpeg",
-    ["-y", "-i", inputPath, "-ar", "16000", "-ac", "1", "-f", "wav", outputPath],
-    { encoding: "utf8" }
-  );
-  if (r.error || r.status !== 0) {
-    warn(`ffmpeg WAV conversion failed: ${r.stderr?.trim() || r.error?.message}`);
-    return false;
-  }
-  return true;
-}
-
-function generateWaveform(audioPath, outPath, bits = 8) {
-  const r = spawnSync(
-    CFG.audiowaveformBin,
-    ["-i", audioPath, "-o", outPath, "--pixels-per-second", "20", "--bits", String(bits)],
-    { encoding: "utf8" }
-  );
-  if (r.error || r.status !== 0) {
-    warn(`audiowaveform failed: ${r.stderr?.trim() || r.error?.message}`);
-    return false;
-  }
-  return true;
+/** Regenerate training-samples-index.json in the bucket from the SQLite DB. */
+async function saveSamplesIndex() {
+  await saveJson(mc, CFG.bucket, CFG.samplesIndexKey, exportSamplesIndexJson(db));
 }
 
 // ─── Stability tracking ───────────────────────────────────────────────────────
@@ -288,24 +130,11 @@ function stableObjects(objects) {
 // Object key layout:
 //   training-samples/<label>/YYYY-MM-DD HH-MM-SS SAMPLE <label>.wav
 //   training-samples-waveforms/<label>/<id>.json
-//   training-samples-index.json  (top-level, same bucket)
-
-const SAMPLE_FILENAME_RE =
-  /^(\d{4}-\d{2}-\d{2}) (\d{2})-(\d{2})-(\d{2}) SAMPLE ([a-z]+)\.wav$/i;
-
-function parseSampleFilename(filename) {
-  const match = SAMPLE_FILENAME_RE.exec(filename);
-  if (!match) return null;
-  const [, datePart, hh, mm, ss, label] = match;
-  const datetimeLocal = `${datePart}T${hh}:${mm}:${ss}`;
-  const stem = filename.slice(0, -".wav".length);
-  const id   = stem
-    .replace(/\s+/g, "_")
-    .replace(/[^a-zA-Z0-9_-]/g, "_")
-    .replace(/_+/g, "_")
-    .replace(/^_|_$/, "");
-  return { date: datePart, datetimeLocal, label: label.toLowerCase(), id };
-}
+//
+// Metadata is stored in SQLite (lib/db.mjs); training-samples-index.json is
+// regenerated from the DB after each update for backwards compatibility with
+// the barktown client (GoblinPiStatus.svelte), which fetches it directly
+// from the public bucket.
 
 async function processTrainingSample(obj) {
   const filename  = path.basename(obj.name);
@@ -329,10 +158,10 @@ async function processTrainingSample(obj) {
   try {
     // Download WAV.
     const tmpWav = path.join(tmpDir, filename);
-    await mc.fGetObject(CFG.bucket, objectKey, tmpWav);
+    await download(mc, CFG.bucket, objectKey, tmpWav);
     log(`[samples]   down: ${filename}`);
 
-    const durationSec = getDuration(tmpWav);
+    const durationSec = getDuration(CFG.ffprobeBin, tmpWav);
     log(`[samples]   duration: ${durationSec.toFixed(2)}s  label: ${label}`);
 
     // Waveform (always generated — samples are short enough to be worth it).
@@ -340,9 +169,9 @@ async function processTrainingSample(obj) {
     if (durationSec >= 1) {
       const waveformFilename = `${id}.json`;
       const tmpWaveform      = path.join(tmpDir, waveformFilename);
-      if (generateWaveform(tmpWav, tmpWaveform, 16)) {
+      if (generateWaveform(CFG.audiowaveformBin, tmpWav, tmpWaveform, 16)) {
         const waveformKey = `${CFG.samplesWavePrefix}${label}/${waveformFilename}`;
-        await upload(tmpWaveform, waveformKey, "application/json");
+        await upload(mc, CFG.bucket, tmpWaveform, waveformKey, "application/json");
         waveformPath = waveformKey;
         log(`[samples]   wave -> ${waveformKey}`);
       } else {
@@ -350,7 +179,7 @@ async function processTrainingSample(obj) {
       }
     }
 
-    // Update training-samples-index.json.
+    // Upsert into SQLite, then regenerate training-samples-index.json.
     const entry = {
       id, filename,
       audioPath: objectKey,
@@ -359,16 +188,9 @@ async function processTrainingSample(obj) {
       durationSec: parseFloat(durationSec.toFixed(3)),
     };
 
-    const entries = await loadSamplesIndex();
-    const idx = entries.findIndex(e => e.id === id);
-    if (idx >= 0) {
-      entries[idx] = entry;
-    } else {
-      entries.push(entry);
-      entries.sort((a, b) => a.datetimeLocal.localeCompare(b.datetimeLocal));
-    }
-    await saveSamplesIndex(entries);
-    log(`[samples]   index updated (${entries.length} total, label=${label})`);
+    upsertSample(db, entry);
+    await saveSamplesIndex();
+    log(`[samples]   db + index updated (label=${label})`);
 
     seenSamplesMap.delete(objectKey);
   } finally {
@@ -387,7 +209,7 @@ async function pollTrainingSamples() {
   try {
     let objects;
     try {
-      objects = await listObjects(CFG.samplesPrefix);
+      objects = await listObjects(mc, CFG.bucket, CFG.samplesPrefix);
     } catch (e) {
       err(`[samples] listObjects failed: ${e.message}`);
       return;
@@ -454,11 +276,11 @@ async function processFile(obj) {
   try {
     // Download.
     const tmpAudio = path.join(tmpDir, filename);
-    await download(objectKey, tmpAudio);
+    await download(mc, CFG.bucket, objectKey, tmpAudio);
     log(`  ↓ downloaded`);
 
     // Duration + kind.
-    const durationSec = getDuration(tmpAudio);
+    const durationSec = getDuration(CFG.ffprobeBin, tmpAudio);
     const kind =
       durationSec < CFG.waveformThreshSec ? "note"
       : "audio";
@@ -473,19 +295,19 @@ async function processFile(obj) {
       if (!convertToWav(tmpAudio, tmpWav)) {
         throw new Error(`ffmpeg WAV conversion failed for "${filename}" — leaving in upload-here/`);
       }
-      if (!generateWaveform(tmpWav, tmpWaveform)) {
+      if (!generateWaveform(CFG.audiowaveformBin, tmpWav, tmpWaveform)) {
         throw new Error(`audiowaveform failed for "${filename}" — leaving in upload-here/`);
       }
       const waveformKey = `${CFG.waveformPrefix}${yyyy}/${mm}/${waveformFilename}`;
-      await upload(tmpWaveform, waveformKey, "application/json");
+      await upload(mc, CFG.bucket, tmpWaveform, waveformKey, "application/json");
       waveformPath = waveformKey;
       log(`  ↑ waveform → ${waveformKey}`);
     }
 
     // Move audio: copy to audio/YYYY/MM/, then delete from upload-here/.
     const audioKey = `${CFG.audioPrefix}${yyyy}/${mm}/${filename}`;
-    await copyObject(objectKey, audioKey);
-    await removeObject(objectKey);
+    await copyObject(mc, CFG.bucket, objectKey, audioKey);
+    await removeObject(mc, CFG.bucket, objectKey);
     log(`  ⇒ audio   → ${audioKey}`);
 
     // Update index.json.
@@ -536,7 +358,7 @@ async function poll() {
 async function _poll() {
   let objects;
   try {
-    objects = await listObjects(CFG.newPrefix);
+    objects = await listObjects(mc, CFG.bucket, CFG.newPrefix);
   } catch (e) {
     err(`listObjects failed: ${e.message}`);
     return;
@@ -546,7 +368,7 @@ async function _poll() {
   for (const o of objects) {
     if (!o.name.endsWith("/") && o.size === 0) {
       warn(`Removing 0-byte file (failed upload?): ${path.basename(o.name)}`);
-      try { await removeObject(o.name); } catch { /* best-effort */ }
+      try { await removeObject(mc, CFG.bucket, o.name); } catch { /* best-effort */ }
       seenMap.delete(o.name);
     }
   }
@@ -585,6 +407,7 @@ async function main() {
   log("barktown ingest-service starting");
   log(`  MinIO  : ${CFG.minio.useSSL ? "https" : "http"}://${CFG.minio.endPoint}:${CFG.minio.port}`);
   log(`  bucket : ${CFG.bucket}`);
+  log(`  db     : ${CFG.dbPath}`);
   log(`  poll   : every ${CFG.pollIntervalMs / 1000}s`);
   log(`  stable : after ${CFG.stabilityDelayMs / 1000}s of no change`);
 
@@ -606,3 +429,12 @@ async function main() {
 }
 
 main().catch(e => { err(e); process.exit(1); });
+
+for (const sig of ["SIGINT", "SIGTERM"]) {
+  process.on(sig, () => {
+    log(`${sig} received, closing database...`);
+    db.close();
+    process.exit(0);
+  });
+}
+

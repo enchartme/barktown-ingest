@@ -17,6 +17,16 @@ Pi-side ingest service for **barktown**. Watches the `upload-here/` prefix in a 
    - Audio is copied to `audio/YYYY/MM/<filename>` then removed from `upload-here/`
    - `index.json` is updated (appended + sorted)
 
+It also watches `training-samples/` for short labeled clips uploaded directly
+by `barktown-goblin` (mic calibration / manual bark samples). Metadata for
+those samples lives in a local SQLite database (`data/barktown.db`, see
+`lib/db.mjs`) — `training-samples-index.json` is regenerated from it after
+every update, purely so the existing barktown client can keep fetching it as
+a static file from the bucket.
+
+Shared code (MinIO helpers, audio helpers, filename parsing) lives in `lib/`
+and is used by both `ingest-service.mjs` and the maintenance scripts.
+
 ---
 
 ## Prerequisites
@@ -62,6 +72,29 @@ All settings are environment variables:
 | `FFPROBE_BIN` | `ffprobe` | Path to ffprobe binary |
 | `AUDIOWAVEFORM_BIN` | `audiowaveform` | Path to audiowaveform binary |
 | `WAVEFORM_THRESHOLD_SEC` | `5` | Min duration to generate a waveform |
+| `DB_PATH` | `./data/barktown.db` | Local SQLite metadata store for training samples |
+
+---
+
+## Training samples database
+
+Training-sample metadata (uploaded by barktown-goblin) is stored in a local
+SQLite database rather than only in `training-samples-index.json`. This
+gives the ingest service transactional, queryable storage as a foundation
+for upcoming CRUD features (delete, rename/move, fragment annotations).
+
+If you already have a `training-samples-index.json` in the bucket from
+before this database existed, import it once:
+
+```bash
+node migrate-samples-to-sqlite.mjs
+# or
+npm run migrate-samples-to-sqlite
+```
+
+This is idempotent — safe to re-run any time. `training-samples-index.json`
+in the bucket continues to be regenerated from the database on every
+update, so the existing barktown client keeps working unchanged.
 
 ---
 

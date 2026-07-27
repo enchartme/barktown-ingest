@@ -49,7 +49,11 @@ const db = openDb(CFG.dbPath);
 const mc = createClient(CFG.minio);
 
 const app = Fastify({ logger: false });
-await app.register(cors, { origin: true });
+// @fastify/cors defaults `methods` to "GET,HEAD,POST" — must list the
+// mutating verbs explicitly or their preflight (OPTIONS) requests get
+// rejected with "CORS Method Not Found", which browsers then report as a
+// generic CORS failure on the real PATCH/DELETE request.
+await app.register(cors, { origin: true, methods: ["GET", "HEAD", "POST", "PATCH", "DELETE"] });
 
 /** Regenerate training-samples-index.json in MinIO from the current DB contents.
  * Best-effort: the DB is the source of truth, and ingest-service.mjs regenerates

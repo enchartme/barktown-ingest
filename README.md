@@ -98,6 +98,48 @@ update, so the existing barktown client keeps working unchanged.
 
 ---
 
+## API server
+
+`server.mjs` is a small Fastify app exposing read-only HTTP endpoints over
+the training-samples database. It runs as a separate process from
+`ingest-service.mjs` — SQLite's WAL mode (enabled in `lib/db.mjs`) safely
+supports one writer plus readers across processes.
+
+There is **no authentication**. This is meant to be reachable only over
+Tailscale (same trust model as barktown-goblin's own status API) — training
+samples are ephemeral and already backed up elsewhere, so the risk of
+open-LAN read/write access is accepted for now. Revisit this before adding
+mutating routes for the (non-ephemeral) diary recordings corpus.
+
+```bash
+node server.mjs
+# or
+npm run server
+```
+
+| Endpoint | Description |
+|---|---|
+| `GET /health` | Liveness check |
+| `GET /api/samples` | List active training samples (`?label=bark` to filter) |
+| `GET /api/samples/:id` | Get one sample |
+| `GET /api/samples/:id/annotations` | List fragment annotations for a sample |
+
+| Variable | Default | Description |
+|---|---|---|
+| `API_HOST` | `0.0.0.0` | Interface to bind |
+| `API_PORT` | `8090` | Port to listen on |
+
+Deploy it the same way as the ingest service — copy `barktown-api.service` to
+`/etc/systemd/system/` and enable it:
+
+```bash
+sudo cp ~/git/enchartme/barktown-ingest/barktown-api.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now barktown-api
+```
+
+---
+
 ## Running manually
 
 ```bash

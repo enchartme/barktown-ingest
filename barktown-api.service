@@ -1,0 +1,24 @@
+[Unit]
+Description=barktown API service - read-only (for now) HTTP API over the training-samples database
+After=network-online.target barktown-ingest.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+
+WorkingDirectory=/home/pi/git/enchartme/barktown-ingest
+ExecStart=/usr/bin/node server.mjs
+Restart=on-failure
+RestartSec=10s
+
+# Edit .env in the WorkingDirectory to set DB_PATH / API_HOST / API_PORT overrides
+# (see .env.example). No auth — intended to be reachable only over Tailscale.
+EnvironmentFile=/home/pi/git/enchartme/barktown-ingest/.env
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=barktown-api
+
+[Install]
+WantedBy=multi-user.target

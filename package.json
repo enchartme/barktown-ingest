@@ -7,6 +7,8 @@
   "scripts": {
     "start": "node ingest-service.mjs",
     "restart": "sudo systemctl restart barktown-ingest",
+    "server": "node server.mjs",
+    "server:restart": "sudo systemctl restart barktown-api",
     "validate-index": "node validate-index.mjs",
     "rebuild-index": "node rebuild-index.mjs",
     "rebuild-samples-index": "node rebuild-samples-index.mjs",
@@ -16,7 +18,9 @@
     "observe": "journalctl -u barktown-ingest -f"
   },
   "dependencies": {
+    "@fastify/cors": "^11.3.0",
     "better-sqlite3": "^13.0.1",
+    "fastify": "^5.10.0",
     "minio": "^8.0.7"
   },
   "engines": {

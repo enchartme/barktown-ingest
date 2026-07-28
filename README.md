@@ -123,6 +123,7 @@ npm run server
 | `GET /api/samples` | List active training samples (`?label=bark` to filter) |
 | `GET /api/samples/:id` | Get one sample |
 | `GET /api/samples/:id/annotations` | List fragment annotations for a sample |
+| `GET /api/annotations` | List every annotation across all samples in one request (includes each annotation's sample `audioPath`/`durationSec`) — for laptop-side training export tooling |
 | `DELETE /api/samples/:id` | Delete a sample (MinIO objects + DB row) |
 | `PATCH /api/samples/:id` | Rename/move a sample to a different label (`{"label":"bark"}`) |
 | `POST /api/samples/:id/annotations` | Add a fragment annotation (`{startSec, endSec, label, source?}`) |

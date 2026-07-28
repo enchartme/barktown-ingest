@@ -150,6 +150,36 @@ sudo systemctl enable --now barktown-api
 
 ---
 
+## Tests
+
+```bash
+npm test
+```
+
+`test/api.test.mjs` runs the real `server.mjs` as a child process against a
+throwaway SQLite DB (no mocking) and exercises the HTTP API directly:
+health check, CORS preflight (regression test for the `@fastify/cors`
+default-methods gotcha that broke PATCH/DELETE from the browser), sample
+lookup, and the full annotation CRUD flow including the aggregate
+`GET /api/annotations`. No external services are needed — none of the
+routes under test call MinIO.
+
+`test/export-fragments.test.mjs` additionally smoke-tests
+`barktown-goblin`'s `tools/export_fragments.py` end to end: fresh export,
+idempotent re-run, relabel-only move (no re-download/re-slice), and
+delete-triggered orphan + cache pruning. It seeds a sample + fragment,
+serves a fixture WAV over a local static file server standing in for the
+public asset bucket, then drives the Python script as a subprocess and
+inspects its output files. This suite is skipped automatically unless
+`python3` and a sibling `../barktown-goblin` checkout (with
+`tools/export_fragments.py`) are both present.
+
+Fixtures and test helpers live under `test/fixtures/` (synthetic WAV
+generation) and `test/helpers/` (spawning `server.mjs`, a static file
+server, and free-port allocation) — nothing is checked in as binary data.
+
+---
+
 ## Running manually
 
 ```bash

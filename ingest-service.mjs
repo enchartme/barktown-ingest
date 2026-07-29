@@ -55,7 +55,7 @@ import {
   createClient, listObjects, download, upload, copyObject, removeObject,
   loadJson, saveJson,
 } from "./lib/minio.mjs";
-import { getDuration, convertToWav, generateWaveform } from "./lib/audio.mjs";
+import { getDuration, convertToWav, convertWavToMp3, generateWaveform } from "./lib/audio.mjs";
 import { parseFilename, parseShortFilename, parseSampleFilename } from "./lib/filenames.mjs";
 import { openDb, upsertSample, exportSamplesIndexJson } from "./lib/db.mjs";
 import { log, warn, err } from "./lib/log.mjs";
@@ -291,8 +291,35 @@ async function processFile(obj) {
     await download(mc, CFG.bucket, objectKey, tmpAudio);
     log(`  ↓ downloaded`);
 
+    // WAV pre-processing: boost volume, compress to MP3, embed metadata.
+    // The converted file replaces tmpAudio for all downstream steps and the
+    // destination filename is updated to .mp3.  The original WAV object key
+    // is still what gets removed from upload-here/ at the end.
+    let processedAudio = tmpAudio;
+    let needsUpload = false; // true → upload local file; false → MinIO copyObject
+    if (filename.toLowerCase().endsWith(".wav")) {
+      const mp3Filename = destFilename.replace(/\.wav$/i, ".mp3");
+      const tmpMp3      = path.join(tmpDir, mp3Filename);
+      const ok = convertWavToMp3(CFG.ffmpegBin, tmpAudio, tmpMp3, {
+        volumePct: CFG.wavVolumeBoostPct,
+        bitrate:   CFG.wavMp3Bitrate,
+        metadata: {
+          title:            label || `Bark recording ${datetimeLocal}`,
+          date,
+          datetime:         datetimeLocal,
+          location:         CFG.recordingLocation || undefined,
+          originalFilename: filename,
+        },
+      });
+      if (!ok) throw new Error(`ffmpeg WAV→MP3 failed for "${filename}"`);
+      processedAudio = tmpMp3;
+      destFilename   = mp3Filename;
+      needsUpload    = true;
+      log(`  ♻ WAV→MP3 (${CFG.wavVolumeBoostPct}% vol, ${CFG.wavMp3Bitrate}kbps) → "${destFilename}"`);
+    }
+
     // Duration + kind.
-    const durationSec = getDuration(CFG.ffprobeBin, tmpAudio);
+    const durationSec = getDuration(CFG.ffprobeBin, processedAudio);
     const kind =
       durationSec < CFG.waveformThreshSec ? "note"
       : "audio";
@@ -304,7 +331,7 @@ async function processFile(obj) {
       const tmpWaveform      = path.join(tmpDir, waveformFilename);
       // audiowaveform only supports WAV/MP3/FLAC/Ogg — convert first
       const tmpWav = path.join(tmpDir, `${id}.wav`);
-      if (!convertToWav(tmpAudio, tmpWav)) {
+      if (!convertToWav(processedAudio, tmpWav)) {
         throw new Error(`ffmpeg WAV conversion failed for "${filename}" — leaving in upload-here/`);
       }
       if (!generateWaveform(CFG.audiowaveformBin, tmpWav, tmpWaveform)) {
@@ -316,9 +343,15 @@ async function processFile(obj) {
       log(`  ↑ waveform → ${waveformKey}`);
     }
 
-    // Move audio: copy to audio/YYYY/MM/, then delete from upload-here/.
+    // Move audio to audio/YYYY/MM/, then delete from upload-here/.
+    // WAV→MP3 conversions are uploaded as a new object (different content
+    // and key); other formats are copied server-side within MinIO.
     const audioKey = `${CFG.audioPrefix}${yyyy}/${mm}/${destFilename}`;
-    await copyObject(mc, CFG.bucket, objectKey, audioKey);
+    if (needsUpload) {
+      await upload(mc, CFG.bucket, processedAudio, audioKey, "audio/mpeg");
+    } else {
+      await copyObject(mc, CFG.bucket, objectKey, audioKey);
+    }
     await removeObject(mc, CFG.bucket, objectKey);
     log(`  ⇒ audio   → ${audioKey}`);
 

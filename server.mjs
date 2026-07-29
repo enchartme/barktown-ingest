@@ -53,7 +53,7 @@ const app = Fastify({ logger: false });
 // mutating verbs explicitly or their preflight (OPTIONS) requests get
 // rejected with "CORS Method Not Found", which browsers then report as a
 // generic CORS failure on the real PATCH/DELETE request.
-await app.register(cors, { origin: true, methods: ["GET", "HEAD", "POST", "PATCH", "DELETE"] });
+await app.register(cors, { origin: true, methods: ["GET", "HEAD", "PUT", "POST", "PATCH", "DELETE", "OPTIONS"] });
 
 /** Regenerate training-samples-index.json in MinIO from the current DB contents.
  * Best-effort: the DB is the source of truth, and ingest-service.mjs regenerates
@@ -274,7 +274,7 @@ app.delete("/api/annotations/:annotationId", async (req, reply) => {
 // ─── Entry point ──────────────────────────────────────────────────────────────
 
 const port = parseInt(process.env.API_PORT ?? "8090", 10);
-const host = process.env.API_HOST ?? "0.0.0.0";
+const host = process.env.API_HOST ?? "127.0.0.1";
 
 try {
   await app.listen({ port, host });

@@ -56,7 +56,7 @@ import {
   loadJson, saveJson,
 } from "./lib/minio.mjs";
 import { getDuration, convertToWav, generateWaveform } from "./lib/audio.mjs";
-import { parseFilename, parseSampleFilename } from "./lib/filenames.mjs";
+import { parseFilename, parseShortFilename, parseSampleFilename } from "./lib/filenames.mjs";
 import { openDb, upsertSample, exportSamplesIndexJson } from "./lib/db.mjs";
 import { log, warn, err } from "./lib/log.mjs";
 
@@ -262,7 +262,19 @@ async function processFile(obj) {
   inProgress.add(objectKey);
   log(`Processing: ${filename}`);
 
-  const parsed = parseFilename(filename);
+  let parsed = parseFilename(filename);
+  let destFilename = filename;
+
+  if (!parsed) {
+    const shortParsed = parseShortFilename(filename);
+    if (shortParsed) {
+      const { normalisedFilename, ...rest } = shortParsed;
+      parsed = rest;
+      destFilename = normalisedFilename;
+      log(`  ↻ normalised filename: "${filename}" → "${destFilename}"`);
+    }
+  }
+
   if (!parsed) {
     warn(`Filename does not match pattern — leaving in /upload-here/: "${filename}"`);
     inProgress.delete(objectKey);
@@ -305,14 +317,14 @@ async function processFile(obj) {
     }
 
     // Move audio: copy to audio/YYYY/MM/, then delete from upload-here/.
-    const audioKey = `${CFG.audioPrefix}${yyyy}/${mm}/${filename}`;
+    const audioKey = `${CFG.audioPrefix}${yyyy}/${mm}/${destFilename}`;
     await copyObject(mc, CFG.bucket, objectKey, audioKey);
     await removeObject(mc, CFG.bucket, objectKey);
     log(`  ⇒ audio   → ${audioKey}`);
 
     // Update index.json.
     const entry = {
-      id, filename,
+      id, filename: destFilename,
       audioPath: audioKey,
       waveformPath,
       date, time, datetimeLocal, label,

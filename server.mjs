@@ -20,7 +20,7 @@
  * ─── Configuration ─────────────────────────────────────────
  *
  *  DB_PATH    Local SQLite database file   (default: ./data/barktown.db)
- *  API_HOST   Interface to bind            (default: 0.0.0.0)
+ *  API_HOST   Interface to bind            (default: 127.0.0.1)
  *  API_PORT   Port to listen on            (default: 8090)
  *
  * ─── Running ───────────────────────────────────────────────────
@@ -38,7 +38,7 @@ import { buildConfig } from "./lib/config.mjs";
 import { createClient, copyObject, removeObject, saveJson } from "./lib/minio.mjs";
 import { parseSampleFilename } from "./lib/filenames.mjs";
 import {
-  openDb, getSample, listSamples, listAnnotations, exportSamplesIndexJson,
+  openDb, getSample, listSamples, listAnnotations, listAllAnnotations, exportSamplesIndexJson,
   deleteSampleRow, renameSampleTransaction,
   getAnnotation, insertAnnotation, updateAnnotation, deleteAnnotationRow,
 } from "./lib/db.mjs";
@@ -117,6 +117,13 @@ app.get("/api/samples/:id/annotations", async (req, reply) => {
     return { error: "not found" };
   }
   return listAnnotations(db, req.params.id);
+});
+
+// All annotations across all active samples, in one request — for laptop-side
+// training export tools (tools/export_fragments.py in barktown-goblin) that
+// need to sync the whole corpus without one request per sample.
+app.get("/api/annotations", async () => {
+  return listAllAnnotations(db);
 });
 
 // ─── Training samples (mutating) ─────────────────────────────────────────

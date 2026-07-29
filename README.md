@@ -136,7 +136,7 @@ a best-effort basis (the database is the source of truth, and
 
 | Variable | Default | Description |
 |---|---|---|
-| `API_HOST` | `0.0.0.0` | Interface to bind |
+| `API_HOST` | `127.0.0.1` | Interface to bind |
 | `API_PORT` | `8090` | Port to listen on |
 
 Deploy it the same way as the ingest service — copy `barktown-api.service` to

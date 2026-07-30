@@ -330,14 +330,21 @@ async function processFile(obj) {
     if (kind === "audio") {
       const waveformFilename = `${id}.json`;
       const tmpWaveform      = path.join(tmpDir, waveformFilename);
-      // audiowaveform only supports WAV/MP3/FLAC/Ogg — convert first.
       // Use the pre-boost original (waveformSource) so volume amplification
       // and MP3 compression artefacts don't distort the waveform shape.
-      const tmpWav = path.join(tmpDir, `${id}.wav`);
-      if (!convertToWav(waveformSource, tmpWav)) {
-        throw new Error(`ffmpeg WAV conversion failed for "${filename}" — leaving in upload-here/`);
+      // If waveformSource is already a WAV, pass it directly — audiowaveform
+      // supports WAV natively and resampling to 16 kHz would discard detail
+      // and cause all-zero output on quiet recordings at 8-bit resolution.
+      // For m4a/aac/mp3 a WAV intermediate is still required.
+      let waveformInput = waveformSource;
+      if (!/\.wav$/i.test(waveformSource)) {
+        const tmpWav = path.join(tmpDir, `${id}.wav`);
+        if (!convertToWav(waveformSource, tmpWav)) {
+          throw new Error(`ffmpeg WAV conversion failed for "${filename}" — leaving in upload-here/`);
+        }
+        waveformInput = tmpWav;
       }
-      if (!generateWaveform(CFG.audiowaveformBin, tmpWav, tmpWaveform)) {
+      if (!generateWaveform(CFG.audiowaveformBin, waveformInput, tmpWaveform, 16)) {
         throw new Error(`audiowaveform failed for "${filename}" — leaving in upload-here/`);
       }
       const waveformKey = `${CFG.waveformPrefix}${yyyy}/${mm}/${waveformFilename}`;

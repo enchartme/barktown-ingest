@@ -35,12 +35,13 @@ loadEnv(import.meta.url);
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import { buildConfig } from "./lib/config.mjs";
-import { createClient, copyObject, removeObject, saveJson } from "./lib/minio.mjs";
+import { createClient, copyObject, removeObject, saveJson, loadJson } from "./lib/minio.mjs";
 import { parseSampleFilename } from "./lib/filenames.mjs";
 import {
   openDb, getSample, listSamples, listAnnotations, listAllAnnotations, exportSamplesIndexJson,
   deleteSampleRow, renameSampleTransaction,
   getAnnotation, insertAnnotation, updateAnnotation, deleteAnnotationRow,
+  listDiaryEntries, getDiaryEntry, deleteDiaryEntryRow,
 } from "./lib/db.mjs";
 import { log, warn, err } from "./lib/log.mjs";
 
@@ -93,7 +94,59 @@ function validateAnnotationInput({ startSec, endSec, label }, durationSec) {
 }
 
 app.get("/health", async () => ({ ok: true }));
+// ─── Diary entries ───────────────────────────────────────────────────────────────
 
+// List all diary entries, ordered by datetime (oldest first).
+app.get("/api/diary", async () => {
+  return listDiaryEntries(db);
+});
+
+// Get a single diary entry.
+app.get("/api/diary/:id", async (req, reply) => {
+  const entry = getDiaryEntry(db, req.params.id);
+  if (!entry) {
+    reply.code(404);
+    return { error: "not found" };
+  }
+  return entry;
+});
+
+// Delete a diary entry: removes the audio + waveform objects from MinIO and
+// the DB row. Returns 204 on success.
+app.delete("/api/diary/:id", async (req, reply) => {
+  const entry = getDiaryEntry(db, req.params.id);
+  if (!entry) {
+    reply.code(404);
+    return { error: "not found" };
+  }
+
+  try {
+    await removeObject(mc, CFG.bucket, entry.audioPath);
+  } catch (e) {
+    warn(`delete diary: could not remove audio object "${entry.audioPath}": ${e.message}`);
+  }
+  if (entry.waveformPath) {
+    try {
+      await removeObject(mc, CFG.bucket, entry.waveformPath);
+    } catch (e) {
+      warn(`delete diary: could not remove waveform object "${entry.waveformPath}": ${e.message}`);
+    }
+  }
+
+  deleteDiaryEntryRow(db, entry.id);
+
+  // Best-effort: update index.json in MinIO to match.
+  try {
+    const indexEntries = await loadJson(mc, CFG.bucket, CFG.indexKey, []);
+    const filtered = indexEntries.filter(e => e.id !== entry.id);
+    if (filtered.length !== indexEntries.length) await saveJson(mc, CFG.bucket, CFG.indexKey, filtered);
+  } catch (e) {
+    warn(`delete diary: failed to update index.json: ${e.message}`);
+  }
+
+  log(`Deleted diary entry ${entry.id}`);
+  return reply.code(204).send();
+});
 // ─── Training samples (read-only) ────────────────────────────────────────────
 
 app.get("/api/samples", async (req) => {

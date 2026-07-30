@@ -57,7 +57,7 @@ import {
 } from "./lib/minio.mjs";
 import { getDuration, convertToWav, convertWavToMp3, generateWaveform } from "./lib/audio.mjs";
 import { parseFilename, parseShortFilename, parseSampleFilename } from "./lib/filenames.mjs";
-import { openDb, upsertSample, exportSamplesIndexJson } from "./lib/db.mjs";
+import { openDb, upsertSample, exportSamplesIndexJson, upsertDiaryEntry } from "./lib/db.mjs";
 import { log, warn, err } from "./lib/log.mjs";
 
 // ─── Config ───────────────────────────────────────────────────────────────────
@@ -371,7 +371,7 @@ async function processFile(obj) {
       log(`  ⇒ audio   → ${audioKey}`);
     }
 
-    // Update index.json.
+    // Build entry object (shared between DB upsert and index.json).
     const entry = {
       id, filename: destFilename,
       audioPath: audioKey,
@@ -381,6 +381,11 @@ async function processFile(obj) {
       kind,
     };
 
+    // Upsert into SQLite diary_entries (source of truth).
+    upsertDiaryEntry(db, entry);
+    log(`  ✓ diary DB  (id=${id})`);
+
+    // Also keep index.json in sync for backwards compatibility.
     const entries = await loadIndex();
     const idx = entries.findIndex(e => e.id === id);
     if (idx >= 0) {

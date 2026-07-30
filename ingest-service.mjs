@@ -296,6 +296,7 @@ async function processFile(obj) {
     // destination filename is updated to .mp3.  The original WAV object key
     // is still what gets removed from upload-here/ at the end.
     let processedAudio = tmpAudio;
+    let waveformSource = tmpAudio; // waveform is always built from the pre-boost original
     let needsUpload = false; // true → upload local file; false → MinIO copyObject
     if (filename.toLowerCase().endsWith(".wav")) {
       const mp3Filename = destFilename.replace(/\.wav$/i, ".mp3");
@@ -329,9 +330,11 @@ async function processFile(obj) {
     if (kind === "audio") {
       const waveformFilename = `${id}.json`;
       const tmpWaveform      = path.join(tmpDir, waveformFilename);
-      // audiowaveform only supports WAV/MP3/FLAC/Ogg — convert first
+      // audiowaveform only supports WAV/MP3/FLAC/Ogg — convert first.
+      // Use the pre-boost original (waveformSource) so volume amplification
+      // and MP3 compression artefacts don't distort the waveform shape.
       const tmpWav = path.join(tmpDir, `${id}.wav`);
-      if (!convertToWav(processedAudio, tmpWav)) {
+      if (!convertToWav(waveformSource, tmpWav)) {
         throw new Error(`ffmpeg WAV conversion failed for "${filename}" — leaving in upload-here/`);
       }
       if (!generateWaveform(CFG.audiowaveformBin, tmpWav, tmpWaveform)) {
@@ -343,17 +346,23 @@ async function processFile(obj) {
       log(`  ↑ waveform → ${waveformKey}`);
     }
 
-    // Move audio to audio/YYYY/MM/, then delete from upload-here/.
+    // Move audio to audio/YYYY/MM/, then remove from upload-here/.
     // WAV→MP3 conversions are uploaded as a new object (different content
     // and key); other formats are copied server-side within MinIO.
+    // Original WAV files are moved to archivePrefix instead of deleted.
     const audioKey = `${CFG.audioPrefix}${yyyy}/${mm}/${destFilename}`;
     if (needsUpload) {
       await upload(mc, CFG.bucket, processedAudio, audioKey, "audio/mpeg");
+      const archiveKey = `${CFG.archivePrefix}${yyyy}/${mm}/${filename}`;
+      await copyObject(mc, CFG.bucket, objectKey, archiveKey);
+      await removeObject(mc, CFG.bucket, objectKey);
+      log(`  ⇒ audio   → ${audioKey}`);
+      log(`  ⇒ archive → ${archiveKey}`);
     } else {
       await copyObject(mc, CFG.bucket, objectKey, audioKey);
+      await removeObject(mc, CFG.bucket, objectKey);
+      log(`  ⇒ audio   → ${audioKey}`);
     }
-    await removeObject(mc, CFG.bucket, objectKey);
-    log(`  ⇒ audio   → ${audioKey}`);
 
     // Update index.json.
     const entry = {

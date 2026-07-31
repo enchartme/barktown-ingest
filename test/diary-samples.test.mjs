@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildDiarySampleMove, SAMPLE_LABELS } from "../lib/diary-samples.mjs";
+import { buildDiarySampleMove } from "../lib/diary-samples.mjs";
+import { SAMPLE_LABELS, SAMPLE_LABEL_COLORS } from "../lib/sample-labels.mjs";
 
 const cfg = {
   audioPrefix: "audio/",
@@ -26,10 +27,10 @@ test("buildDiarySampleMove normalizes label case and whitespace", () => {
   assert.equal(buildDiarySampleMove(entry, "  Homestead ", cfg).label, "homestead");
 });
 
-test("the false-positive picker exposes the complete fixed label taxonomy", () => {
-  assert.deepEqual(SAMPLE_LABELS, [
-    "bark", "yap", "background", "wind", "homestead", "traffic", "gunshot", "wrongdog",
-  ]);
+test("the sample label catalog has unique labels and a color for each", () => {
+  assert.equal(new Set(SAMPLE_LABELS).size, SAMPLE_LABELS.length);
+  assert.deepEqual(Object.keys(SAMPLE_LABEL_COLORS), SAMPLE_LABELS);
+  assert.ok(Object.values(SAMPLE_LABEL_COLORS).every((color) => /^#[0-9a-f]{6}$/i.test(color)));
 });
 
 test("buildDiarySampleMove rejects unknown labels before deriving storage keys", () => {

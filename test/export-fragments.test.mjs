@@ -1,12 +1,12 @@
 // test/export-fragments.test.mjs — end-to-end smoke test for
-// barktown-goblin's tools/export_fragments.py against this repo's real
+// barktown-utils' tools/export_fragments.py against this repo's real
 // server.mjs, a throwaway SQLite DB, and a fixture asset server.
 //
 // This automates the manual verification steps used while building the
 // tool: fresh export, idempotent re-run, relabel-only move (no
 // re-download/re-slice), and delete-triggered orphan + cache pruning.
 //
-// Skipped automatically if the barktown-goblin sibling repo (expected to
+// Skipped automatically if the barktown-utils sibling repo (expected to
 // be checked out next to this one) or python3 aren't available.
 
 import { test, before, after } from "node:test";
@@ -22,14 +22,14 @@ import { startStaticServer } from "./helpers/static-file-server.mjs";
 import { writeTestWav } from "./fixtures/make-test-wav.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const GOBLIN_REPO = path.resolve(REPO_ROOT, "..", "barktown-goblin");
-const EXPORT_SCRIPT = path.join(GOBLIN_REPO, "tools", "export_fragments.py");
+const UTILS_REPO = path.resolve(REPO_ROOT, "..", "barktown-utils");
+const EXPORT_SCRIPT = path.join(UTILS_REPO, "tools", "export_fragments.py");
 
 const pythonCheck = spawnSync("python3", ["--version"]);
 const available = pythonCheck.status === 0 && fs.existsSync(EXPORT_SCRIPT);
 const skip = available
   ? false
-  : "requires python3 and a sibling ../barktown-goblin checkout with tools/export_fragments.py";
+  : "requires python3 and a sibling ../barktown-utils checkout with tools/export_fragments.py";
 
 let tmpDir;
 let seedDb;

@@ -96,6 +96,8 @@ This is idempotent — safe to re-run any time. `training-samples-index.json`
 in the bucket continues to be regenerated from the database on every
 update, so the existing barktown client keeps working unchanged.
 
+Completed one-time operations and their tests are retained under `archive/`.
+
 ---
 
 ## API server

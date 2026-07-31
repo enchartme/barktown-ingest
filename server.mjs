@@ -37,6 +37,7 @@ import cors from "@fastify/cors";
 import { buildConfig } from "./lib/config.mjs";
 import { createClient, copyObject, removeObject, saveJson, loadJson } from "./lib/minio.mjs";
 import { parseSampleFilename } from "./lib/filenames.mjs";
+import { buildDiarySampleMove } from "./lib/diary-samples.mjs";
 import {
   openDb, getSample, listSamples, listAnnotations, listAllAnnotations, exportSamplesIndexJson,
   deleteSampleRow, renameSampleTransaction,
@@ -93,6 +94,16 @@ function validateAnnotationInput({ startSec, endSec, label }, durationSec) {
   return null;
 }
 
+/** Stat an object, returning null only for a genuine not-found response. */
+async function statObjectIfExists(objectKey) {
+  try {
+    return await mc.statObject(CFG.bucket, objectKey);
+  } catch (e) {
+    if (e.code === "NoSuchKey" || e.code === "NotFound") return null;
+    throw e;
+  }
+}
+
 app.get("/health", async () => ({ ok: true }));
 // ─── Diary entries ───────────────────────────────────────────────────────────────
 
@@ -146,6 +157,86 @@ app.delete("/api/diary/:id", async (req, reply) => {
 
   log(`Deleted diary entry ${entry.id}`);
   return reply.code(204).send();
+});
+
+// Turn a false-positive diary recording into a labeled training sample.
+// The sample is copied from the original, uncompressed WAV archive; the
+// ingest service will notice the new training-samples/ object, generate its
+// waveform, and populate the samples database in its normal poll cycle.
+app.post("/api/diary/:id/move-to-samples", async (req, reply) => {
+  const entry = getDiaryEntry(db, req.params.id);
+  if (!entry) {
+    reply.code(404);
+    return { error: "not found" };
+  }
+
+  let move;
+  try {
+    move = buildDiarySampleMove(entry, req.body?.label, CFG);
+  } catch (e) {
+    reply.code(400);
+    return { error: e.message };
+  }
+
+  let sourceStat;
+  let destinationStat;
+  try {
+    [sourceStat, destinationStat] = await Promise.all([
+      statObjectIfExists(move.sourceKey),
+      statObjectIfExists(move.destinationKey),
+    ]);
+  } catch (e) {
+    err(`move diary to samples: object preflight failed for ${entry.id}: ${e.message}`);
+    reply.code(502);
+    return { error: `failed to inspect objects in MinIO: ${e.message}` };
+  }
+
+  // A destination can already exist after a partially successful request.
+  // If the source also remains, only treat it as resumable when both objects
+  // have identical content; otherwise protect the existing sample.
+  if (sourceStat && destinationStat) {
+    if (sourceStat.size !== destinationStat.size || sourceStat.etag !== destinationStat.etag) {
+      reply.code(409);
+      return { error: `sample destination already exists: ${move.destinationKey}` };
+    }
+  } else if (!sourceStat && !destinationStat) {
+    reply.code(409);
+    return { error: `original WAV not found: ${move.sourceKey}` };
+  }
+
+  // Keep the diary row until every object operation succeeds. removeObject is
+  // idempotent, so a request can safely resume after a partial failure.
+  try {
+    await removeObject(mc, CFG.bucket, entry.audioPath);
+    if (entry.waveformPath) await removeObject(mc, CFG.bucket, entry.waveformPath);
+
+    if (sourceStat && !destinationStat) {
+      await copyObject(mc, CFG.bucket, move.sourceKey, move.destinationKey);
+    }
+    if (sourceStat) await removeObject(mc, CFG.bucket, move.sourceKey);
+  } catch (e) {
+    err(`move diary to samples: MinIO mutation failed for ${entry.id}: ${e.message}`);
+    reply.code(502);
+    return { error: `failed to move recording in MinIO: ${e.message}` };
+  }
+
+  deleteDiaryEntryRow(db, entry.id);
+
+  // Best-effort legacy index maintenance; SQLite is the diary source of truth.
+  try {
+    const indexEntries = await loadJson(mc, CFG.bucket, CFG.indexKey, []);
+    const filtered = indexEntries.filter(e => e.id !== entry.id);
+    if (filtered.length !== indexEntries.length) await saveJson(mc, CFG.bucket, CFG.indexKey, filtered);
+  } catch (e) {
+    warn(`move diary to samples: failed to update index.json: ${e.message}`);
+  }
+
+  log(`Moved diary entry ${entry.id} -> ${move.destinationKey}`);
+  return {
+    filename: move.filename,
+    audioPath: move.destinationKey,
+    label: move.label,
+  };
 });
 // ─── Training samples (read-only) ────────────────────────────────────────────
 

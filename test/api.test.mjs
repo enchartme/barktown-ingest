@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { openDb, upsertSample } from "../lib/db.mjs";
+import { openDb, upsertSample, upsertDiaryEntry } from "../lib/db.mjs";
 import { startTestServer } from "./helpers/test-server.mjs";
 
 let tmpDir;
@@ -31,6 +31,18 @@ before(async () => {
     date: "2026-01-01",
     datetimeLocal: "2026-01-01T12:00:00",
     durationSec: 2,
+  });
+  upsertDiaryEntry(seedDb, {
+    id: "2026-01-02_13-14-15_false-positive",
+    filename: "2026-01-02 13-14-15 false-positive.mp3",
+    audioPath: "audio/2026/01/2026-01-02 13-14-15 false-positive.mp3",
+    waveformPath: "waveforms/2026/01/2026-01-02_13-14-15_false-positive.json",
+    label: "false-positive",
+    date: "2026-01-02",
+    time: "13:14",
+    datetimeLocal: "2026-01-02T13:14:15",
+    durationSec: 8,
+    kind: "audio",
   });
 
   server = await startTestServer({ dbPath });
@@ -75,6 +87,16 @@ test("GET /api/samples/:id returns the seeded sample", async () => {
 test("GET /api/samples/:id returns 404 for an unknown id", async () => {
   const res = await fetch(`${server.baseUrl}/api/samples/does-not-exist`);
   assert.equal(res.status, 404);
+});
+
+test("POST /api/diary/:id/move-to-samples rejects labels outside the taxonomy", async () => {
+  const res = await fetch(`${server.baseUrl}/api/diary/2026-01-02_13-14-15_false-positive/move-to-samples`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ label: "other" }),
+  });
+  assert.equal(res.status, 400);
+  assert.match((await res.json()).error, /label must be one of/);
 });
 
 let annotationId;

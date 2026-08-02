@@ -169,7 +169,7 @@ async function processTrainingSample(obj) {
     if (durationSec >= 1) {
       const waveformFilename = `${id}.json`;
       const tmpWaveform      = path.join(tmpDir, waveformFilename);
-      if (generateWaveform(CFG.audiowaveformBin, tmpWav, tmpWaveform, 16)) {
+      if (generateWaveform(CFG.audiowaveformBin, tmpWav, tmpWaveform, 16, 50)) {
         const waveformKey = `${CFG.samplesWavePrefix}${label}/${waveformFilename}`;
         await upload(mc, CFG.bucket, tmpWaveform, waveformKey, "application/json");
         waveformPath = waveformKey;
@@ -349,7 +349,7 @@ async function processFile(obj) {
         }
         waveformInput = tmpWav;
       }
-      if (!generateWaveform(CFG.audiowaveformBin, waveformInput, tmpWaveform, 16)) {
+      if (!generateWaveform(CFG.audiowaveformBin, waveformInput, tmpWaveform, 16, 50)) {
         throw new Error(`audiowaveform failed for "${filename}" — leaving in upload-here/`);
       }
       const waveformKey = `${CFG.waveformPrefix}${yyyy}/${mm}/${waveformFilename}`;

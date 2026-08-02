@@ -231,6 +231,8 @@ app.post("/api/diary/:id/move-to-samples", async (req, reply) => {
     return { error: e.message };
   }
 
+  const keepInDiary = Boolean(req.body?.keepInDiary);
+
   let sourceStat;
   let destinationStat;
   try {
@@ -259,40 +261,54 @@ app.post("/api/diary/:id/move-to-samples", async (req, reply) => {
 
   // Keep the diary row until every object operation succeeds. removeObject is
   // idempotent, so a request can safely resume after a partial failure.
+  const newParsed = parseSampleFilename(move.filename);
+  const sampleWaveformKey = newParsed && entry.waveformPath
+    ? `${CFG.samplesWavePrefix}${move.label}/${newParsed.id}.json`
+    : null;
   try {
-    await removeObject(mc, CFG.bucket, entry.audioPath);
-    if (entry.waveformPath) await removeObject(mc, CFG.bucket, entry.waveformPath);
+    if (!keepInDiary) {
+      await removeObject(mc, CFG.bucket, entry.audioPath);
+      if (entry.waveformPath) await removeObject(mc, CFG.bucket, entry.waveformPath);
+    }
 
     if (sourceStat && !destinationStat) {
       await copyObject(mc, CFG.bucket, move.sourceKey, move.destinationKey);
     }
-    if (sourceStat) await removeObject(mc, CFG.bucket, move.sourceKey);
+    if (sourceStat && !keepInDiary) await removeObject(mc, CFG.bucket, move.sourceKey);
+
+    // Copy the diary waveform to the training-samples-waveforms path so it
+    // is available immediately without waiting for the ingest service.
+    if (sampleWaveformKey && entry.waveformPath) {
+      try {
+        await copyObject(mc, CFG.bucket, entry.waveformPath, sampleWaveformKey);
+      } catch (e) {
+        warn(`move diary to samples: could not copy waveform for ${entry.id}: ${e.message}`);
+      }
+    }
   } catch (e) {
     err(`move diary to samples: MinIO mutation failed for ${entry.id}: ${e.message}`);
     reply.code(502);
     return { error: `failed to move recording in MinIO: ${e.message}` };
   }
 
-  deleteDiaryEntryRow(db, entry.id);
+  if (!keepInDiary) deleteDiaryEntryRow(db, entry.id);
 
-  // If hit metadata exists, pre-create the sample row and bark fragment
-  // annotations so they're available before the ingest service processes
-  // the new training-samples/ file.  The ingest service will upsert the
-  // sample later with the real durationSec/waveformPath.
+  // Pre-create the sample row and bark fragment annotations so they're
+  // available before the ingest service processes the new WAV file.
+  // The ingest service will upsert the sample later with the real durationSec.
   const hitMeta = getHitMetadata(db, entry.id);
-  if (hitMeta && hitMeta.timestamps.length > 0) {
-    const newParsed = parseSampleFilename(move.filename);
-    if (newParsed) {
-      upsertSample(db, {
-        id: newParsed.id,
-        filename: move.filename,
-        audioPath: move.destinationKey,
-        waveformPath: null,
-        label: move.label,
-        date: newParsed.date,
-        datetimeLocal: newParsed.datetimeLocal,
-        durationSec: 0,
-      });
+  if (newParsed) {
+    upsertSample(db, {
+      id: newParsed.id,
+      filename: move.filename,
+      audioPath: move.destinationKey,
+      waveformPath: sampleWaveformKey,
+      label: move.label,
+      date: newParsed.date,
+      datetimeLocal: newParsed.datetimeLocal,
+      durationSec: entry.durationSec ?? 0,
+    });
+    if (hitMeta && hitMeta.timestamps.length > 0) {
       for (let i = 0; i < hitMeta.timestamps.length; i++) {
         const startSec = hitMeta.timestamps[i];
         insertAnnotation(db, newParsed.id, {
@@ -305,18 +321,20 @@ app.post("/api/diary/:id/move-to-samples", async (req, reply) => {
       log(`Created ${hitMeta.timestamps.length} bark annotation(s) for new sample ${newParsed.id}`);
     }
   }
-  deleteHitMetadataRow(db, entry.id);
+  if (!keepInDiary) deleteHitMetadataRow(db, entry.id);
 
   // Best-effort legacy index maintenance; SQLite is the diary source of truth.
-  try {
-    const indexEntries = await loadJson(mc, CFG.bucket, CFG.indexKey, []);
-    const filtered = indexEntries.filter(e => e.id !== entry.id);
-    if (filtered.length !== indexEntries.length) await saveJson(mc, CFG.bucket, CFG.indexKey, filtered);
-  } catch (e) {
-    warn(`move diary to samples: failed to update index.json: ${e.message}`);
+  if (!keepInDiary) {
+    try {
+      const indexEntries = await loadJson(mc, CFG.bucket, CFG.indexKey, []);
+      const filtered = indexEntries.filter(e => e.id !== entry.id);
+      if (filtered.length !== indexEntries.length) await saveJson(mc, CFG.bucket, CFG.indexKey, filtered);
+    } catch (e) {
+      warn(`move diary to samples: failed to update index.json: ${e.message}`);
+    }
   }
 
-  log(`Moved diary entry ${entry.id} -> ${move.destinationKey}`);
+  log(`${keepInDiary ? 'Copied' : 'Moved'} diary entry ${entry.id} -> ${move.destinationKey}`);
   return {
     filename: move.filename,
     audioPath: move.destinationKey,

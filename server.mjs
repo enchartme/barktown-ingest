@@ -356,7 +356,7 @@ app.post("/api/samples/:id/regenerate-waveform", async (req, reply) => {
     return { error: "not found" };
   }
 
-  const ALLOWED_PPS = [20, 100, 1000];
+  const ALLOWED_PPS = [20, 50, 100];
   const pps = Number(req.body?.pixelsPerSecond);
   if (!ALLOWED_PPS.includes(pps)) {
     reply.code(400);

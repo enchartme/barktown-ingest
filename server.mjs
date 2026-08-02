@@ -139,7 +139,7 @@ app.get("/api/diary/:id/hit-metadata", async (req, reply) => {
 // The corresponding diary_entries row may not exist yet (ingest service is asynchronous),
 // so this is an upsert keyed on clip_id with no FK requirement.
 app.post("/api/diary/:id/hit-metadata", async (req, reply) => {
-  const { timestamps, confidences, loudnesses, padding_s: paddingS } = req.body ?? {};
+  const { timestamps, confidences, loudnesses, padding_s: paddingS, window_s: windowS } = req.body ?? {};
 
   if (!Array.isArray(timestamps) || !Array.isArray(confidences) || !Array.isArray(loudnesses)) {
     reply.code(400);
@@ -168,6 +168,7 @@ app.post("/api/diary/:id/hit-metadata", async (req, reply) => {
     confidences,
     loudnesses,
     paddingS: typeof paddingS === "number" && Number.isFinite(paddingS) ? paddingS : 0,
+    windowS:  typeof windowS  === "number" && Number.isFinite(windowS)  && windowS > 0 ? windowS : 1.5,
   });
   reply.code(201);
   return getHitMetadata(db, req.params.id);

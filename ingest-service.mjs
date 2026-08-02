@@ -308,7 +308,11 @@ async function processFile(obj) {
           title:            label || `Bark recording ${datetimeLocal}`,
           date,
           datetime:         datetimeLocal,
-          location:         CFG.recordingLocation || undefined,
+          location:         CFG.recordingLocation  || undefined,
+          direction:        CFG.recordingDirection || undefined,
+          artist:           CFG.recordingArtist    || undefined,
+          album:            CFG.recordingAlbum     || undefined,
+          copyright:        CFG.recordingCopyright || undefined,
           originalFilename: filename,
         },
       });

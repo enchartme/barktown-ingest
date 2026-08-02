@@ -20,10 +20,10 @@ import { loadEnv } from "./lib/env.mjs";
 loadEnv(import.meta.url);
 
 import Database from "better-sqlite3";
-import { getConfig }  from "./lib/config.mjs";
+import { buildConfig }  from "./lib/config.mjs";
 
 const apply = process.argv.includes("--apply");
-const cfg   = getConfig();
+const cfg   = buildConfig();
 const db    = new Database(cfg.dbPath);
 
 const samples = db

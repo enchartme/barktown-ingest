@@ -32,10 +32,14 @@
 import { loadEnv } from "./lib/env.mjs";
 loadEnv(import.meta.url);
 
+import fs from "fs";
+import os from "os";
+import path from "path";
+
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import { buildConfig } from "./lib/config.mjs";
-import { createClient, copyObject, removeObject, saveJson, loadJson } from "./lib/minio.mjs";
+import { createClient, copyObject, removeObject, saveJson, loadJson, download, upload } from "./lib/minio.mjs";
 import { parseSampleFilename } from "./lib/filenames.mjs";
 import { buildDiarySampleMove } from "./lib/diary-samples.mjs";
 import {
@@ -47,6 +51,7 @@ import {
   upsertSample,
 } from "./lib/db.mjs";
 import { log, warn, err } from "./lib/log.mjs";
+import { generateWaveform } from "./lib/audio.mjs";
 
 const CFG = buildConfig();
 const db = openDb(CFG.dbPath);
@@ -341,6 +346,48 @@ app.post("/api/diary/:id/move-to-samples", async (req, reply) => {
     label: move.label,
   };
 });
+
+// Regenerate the waveform for a training sample at a higher pixels-per-second
+// resolution, replacing the existing waveform object in MinIO and updating the DB.
+app.post("/api/samples/:id/regenerate-waveform", async (req, reply) => {
+  const sample = getSample(db, req.params.id);
+  if (!sample || sample.status !== "active") {
+    reply.code(404);
+    return { error: "not found" };
+  }
+
+  const ALLOWED_PPS = [20, 100, 1000];
+  const pps = Number(req.body?.pixelsPerSecond);
+  if (!ALLOWED_PPS.includes(pps)) {
+    reply.code(400);
+    return { error: `pixelsPerSecond must be one of: ${ALLOWED_PPS.join(", ")}` };
+  }
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "barktown-regen-"));
+  try {
+    const filename = path.basename(sample.audioPath);
+    const tmpAudio    = path.join(tmpDir, filename);
+    const tmpWaveform = path.join(tmpDir, `${sample.id}.json`);
+
+    await download(mc, CFG.bucket, sample.audioPath, tmpAudio);
+
+    if (!generateWaveform(CFG.audiowaveformBin, tmpAudio, tmpWaveform, 16, pps)) {
+      reply.code(500);
+      return { error: "audiowaveform failed" };
+    }
+
+    const waveformKey = `${CFG.samplesWavePrefix}${sample.label}/${sample.id}.json`;
+    await upload(mc, CFG.bucket, tmpWaveform, waveformKey, "application/json");
+
+    upsertSample(db, { ...sample, waveformPath: waveformKey });
+
+    log(`Regenerated waveform for ${sample.id} at ${pps} px/s`);
+    return { waveformPath: waveformKey };
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 // ─── Training samples (read-only) ────────────────────────────────────────────
 
 app.get("/api/samples", async (req) => {

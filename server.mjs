@@ -43,6 +43,8 @@ import {
   deleteSampleRow, renameSampleTransaction,
   getAnnotation, insertAnnotation, updateAnnotation, deleteAnnotationRow,
   listDiaryEntries, getDiaryEntry, deleteDiaryEntryRow,
+  upsertHitMetadata, getHitMetadata, deleteHitMetadataRow,
+  upsertSample,
 } from "./lib/db.mjs";
 import { log, warn, err } from "./lib/log.mjs";
 
@@ -122,6 +124,55 @@ app.get("/api/diary/:id", async (req, reply) => {
   return entry;
 });
 
+// Get hit metadata for a diary clip (timestamps, confidences, loudnesses per bark hit).
+// Returns 404 if no metadata has been submitted for this clip.
+app.get("/api/diary/:id/hit-metadata", async (req, reply) => {
+  const meta = getHitMetadata(db, req.params.id);
+  if (!meta) {
+    reply.code(404);
+    return { error: "not found" };
+  }
+  return meta;
+});
+
+// Store hit metadata sent by barktown-goblin immediately after a successful upload.
+// The corresponding diary_entries row may not exist yet (ingest service is asynchronous),
+// so this is an upsert keyed on clip_id with no FK requirement.
+app.post("/api/diary/:id/hit-metadata", async (req, reply) => {
+  const { timestamps, confidences, loudnesses, padding_s: paddingS } = req.body ?? {};
+
+  if (!Array.isArray(timestamps) || !Array.isArray(confidences) || !Array.isArray(loudnesses)) {
+    reply.code(400);
+    return { error: "timestamps, confidences and loudnesses must be arrays" };
+  }
+  const n = timestamps.length;
+  if (confidences.length !== n || loudnesses.length !== n) {
+    reply.code(400);
+    return { error: "timestamps, confidences and loudnesses must have the same length" };
+  }
+  if (!timestamps.every(v => typeof v === "number" && Number.isFinite(v) && v >= 0)) {
+    reply.code(400);
+    return { error: "timestamps must be non-negative finite numbers" };
+  }
+  if (!confidences.every(v => typeof v === "number" && Number.isFinite(v) && v >= 0 && v <= 1)) {
+    reply.code(400);
+    return { error: "confidences must be numbers in [0, 1]" };
+  }
+  if (!loudnesses.every(v => typeof v === "number" && Number.isFinite(v) && v >= 0)) {
+    reply.code(400);
+    return { error: "loudnesses must be non-negative finite numbers" };
+  }
+
+  upsertHitMetadata(db, req.params.id, {
+    timestamps,
+    confidences,
+    loudnesses,
+    paddingS: typeof paddingS === "number" && Number.isFinite(paddingS) ? paddingS : 0,
+  });
+  reply.code(201);
+  return getHitMetadata(db, req.params.id);
+});
+
 // Delete a diary entry: removes the audio + waveform objects from MinIO and
 // the DB row. Returns 204 on success.
 app.delete("/api/diary/:id", async (req, reply) => {
@@ -145,6 +196,7 @@ app.delete("/api/diary/:id", async (req, reply) => {
   }
 
   deleteDiaryEntryRow(db, entry.id);
+  deleteHitMetadataRow(db, entry.id);
 
   // Best-effort: update index.json in MinIO to match.
   try {
@@ -221,6 +273,38 @@ app.post("/api/diary/:id/move-to-samples", async (req, reply) => {
   }
 
   deleteDiaryEntryRow(db, entry.id);
+
+  // If hit metadata exists, pre-create the sample row and bark fragment
+  // annotations so they're available before the ingest service processes
+  // the new training-samples/ file.  The ingest service will upsert the
+  // sample later with the real durationSec/waveformPath.
+  const hitMeta = getHitMetadata(db, entry.id);
+  if (hitMeta && hitMeta.timestamps.length > 0) {
+    const newParsed = parseSampleFilename(move.filename);
+    if (newParsed) {
+      upsertSample(db, {
+        id: newParsed.id,
+        filename: move.filename,
+        audioPath: move.destinationKey,
+        waveformPath: null,
+        label: move.label,
+        date: newParsed.date,
+        datetimeLocal: newParsed.datetimeLocal,
+        durationSec: 0,
+      });
+      for (let i = 0; i < hitMeta.timestamps.length; i++) {
+        const startSec = hitMeta.timestamps[i];
+        insertAnnotation(db, newParsed.id, {
+          startSec,
+          endSec: parseFloat((startSec + 1.5).toFixed(3)),
+          label: "bark",
+          source: "model",
+        });
+      }
+      log(`Created ${hitMeta.timestamps.length} bark annotation(s) for new sample ${newParsed.id}`);
+    }
+  }
+  deleteHitMetadataRow(db, entry.id);
 
   // Best-effort legacy index maintenance; SQLite is the diary source of truth.
   try {

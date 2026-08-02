@@ -312,6 +312,7 @@ app.post("/api/diary/:id/move-to-samples", async (req, reply) => {
       date: newParsed.date,
       datetimeLocal: newParsed.datetimeLocal,
       durationSec: entry.durationSec ?? 0,
+      diaryId: entry.id,
     });
     if (hitMeta && hitMeta.timestamps.length > 0) {
       for (let i = 0; i < hitMeta.timestamps.length; i++) {

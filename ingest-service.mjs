@@ -313,6 +313,7 @@ async function processFile(obj) {
           artist:           CFG.recordingArtist    || undefined,
           album:            CFG.recordingAlbum     || undefined,
           copyright:        CFG.recordingCopyright || undefined,
+          appUrl:           CFG.barktownUrl ? `${CFG.barktownUrl}/#${id}` : undefined,
           originalFilename: filename,
         },
       });
